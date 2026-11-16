@@ -1,8 +1,16 @@
 import json
 import re
+import ssl
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Optional
 import httpx
+
+try:
+    import truststore
+    truststore.inject_into_ssl()
+    _SSL_CTX: ssl.SSLContext | bool = truststore.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+except Exception:
+    _SSL_CTX = False
 from ..config import ZLLAMA_API_KEY, ZLLAMA_BASE_URL, MODEL_PRESETS
 from ..db import get_app_settings
 from .dedupe import (
@@ -63,7 +71,7 @@ def _call_zllama_chat(
             payload["response_format"] = {"type": "json_object"}
 
         try:
-            with httpx.Client(timeout=timeout) as client:
+            with httpx.Client(timeout=timeout, verify=_SSL_CTX) as client:
                 resp = client.post(url, headers=headers, json=payload)
                 resp.raise_for_status()
                 data = resp.json()
@@ -321,7 +329,7 @@ Return a valid JSON object matching this EXACT structure:
             preset["vision_extract_chain"],
             [{"role": "user", "content": user_content}],
             expect_json=True,
-            timeout=55.0,
+            timeout=90.0,
         )
         models_used["vision_extraction"] = vision_model
     except Exception:
