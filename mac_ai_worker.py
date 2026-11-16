@@ -9,6 +9,7 @@ Outbound-Only Mac AI Worker for Sister's Rishta Dossier.
 """
 import os
 import socket
+import ssl
 import sys
 import tempfile
 import time
@@ -16,6 +17,13 @@ from pathlib import Path
 
 ROOT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT_DIR / "backend"))
+
+try:
+    import truststore
+    truststore.inject_into_ssl()
+    SSL_CTX: ssl.SSLContext | bool = truststore.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+except Exception:
+    SSL_CTX = False
 
 from dotenv import load_dotenv
 import httpx
@@ -48,7 +56,7 @@ def process_queued_task(cloud_url: str, headers: dict, task: dict, existing_prof
             if not mid:
                 continue
             try:
-                with httpx.Client(timeout=30.0) as client:
+                with httpx.Client(timeout=30.0, verify=SSL_CTX) as client:
                     r = client.get(f"{cloud_url}/api/worker/media/{mid}", headers=headers)
                     r.raise_for_status()
                     disp = r.headers.get("content-disposition", "")
@@ -103,7 +111,7 @@ def run_worker_loop(cloud_url: str) -> None:
 
     while True:
         try:
-            with httpx.Client(timeout=15.0) as client:
+            with httpx.Client(timeout=15.0, verify=SSL_CTX) as client:
                 resp = client.post(
                     f"{cloud_url}/api/worker/poll",
                     headers=headers,
@@ -120,7 +128,7 @@ def run_worker_loop(cloud_url: str) -> None:
                 ai_bundle = process_queued_task(
                     cloud_url, headers, task, data.get("existing_profiles") or []
                 )
-                with httpx.Client(timeout=20.0) as client:
+                with httpx.Client(timeout=20.0, verify=SSL_CTX) as client:
                     c_resp = client.post(
                         f"{cloud_url}/api/worker/tasks/{tid}/complete",
                         headers=headers,

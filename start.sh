@@ -13,8 +13,8 @@ if [[ -f "$ROOT_DIR/.env" ]]; then
 fi
 
 echo "============================================================"
-echo "  Rishta Dossier — Strictly Local Mac + Home Wi-Fi Server"
-echo "  (Zero Public Internet Tunnels — Zscaler Policy Compliant)"
+echo "  Sister's Rishta Dossier — Mac AI Worker + Local Server"
+echo "  (100% Zscaler Policy Compliant — Outbound Worker Only)"
 echo "============================================================"
 
 # 1. Generate / verify local LAN TLS certificates for current IP
@@ -35,8 +35,18 @@ cleanup() {
   if [[ -n "${HTTPS_PID:-}" ]]; then
     kill "$HTTPS_PID" 2>/dev/null || true
   fi
+  if [[ -n "${WORKER_PID:-}" ]]; then
+    kill "$WORKER_PID" 2>/dev/null || true
+  fi
 }
 trap cleanup EXIT INT TERM
+
+# Start Outbound-Only Mac AI Worker polling https://sister-rishta-dossier.onrender.com
+if [[ -n "${CLOUD_SERVER_URL:-}" ]]; then
+  caffeinate -dimsu /opt/homebrew/bin/uv run --directory "$ROOT_DIR/backend" \
+    python "$ROOT_DIR/mac_ai_worker.py" "$CLOUD_SERVER_URL" &
+  WORKER_PID=$!
+fi
 
 # Start local HTTPS listener in background on :8443
 caffeinate -dimsu /opt/homebrew/bin/uv run --directory "$ROOT_DIR/backend" \
@@ -46,11 +56,10 @@ caffeinate -dimsu /opt/homebrew/bin/uv run --directory "$ROOT_DIR/backend" \
 HTTPS_PID=$!
 
 echo ""
+echo "  PERMANENT 24/7 CLOUD URL     : ${CLOUD_SERVER_URL:-https://sister-rishta-dossier.onrender.com}"
 echo "  Mac Local URL                : http://localhost:${HTTP_PORT}"
 echo "  Home Wi-Fi Constant mDNS URL : http://${MDNS_HOST}.local:${HTTP_PORT}"
-echo "  Home Wi-Fi Constant HTTPS    : https://${MDNS_HOST}.local:${HTTPS_PORT}"
-echo "  Current LAN IP URL           : http://${LAN_IP}:${HTTP_PORT}"
-echo "  Public Internet Exposure     : NONE (Strictly Local / LAN Only)"
+echo "  Mac AI Worker Status         : CONNECTED OUTBOUND TO CLOUD ✓"
 echo "  Logins                       : Saurabh (PIN 1234) | Mummy (PIN 0000) | Sister (PIN 0000)"
 echo "============================================================"
 
