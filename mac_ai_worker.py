@@ -89,6 +89,7 @@ def process_queued_task(cloud_url: str, headers: dict, task: dict, existing_prof
         source_name=payload.get("source_name"),
         source_channel=payload.get("source_channel"),
         existing_profile=existing_profile,
+        existing_profiles_catalog=existing_profiles,
     )
     return ai_bundle
 

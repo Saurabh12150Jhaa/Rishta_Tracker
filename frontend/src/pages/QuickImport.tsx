@@ -320,17 +320,17 @@ export const QuickImport: React.FC<QuickImportProps> = ({ preselectedProfileId, 
         >
           <UploadCloud size={26} color="var(--color-accent)" style={{ marginBottom: "0.3rem" }} />
           <div style={{ fontWeight: 600, fontSize: "0.92rem" }}>
-            Attach Biodata PDFs, Photos/Screenshots, WhatsApp Voice Notes (.opus), or Exported Chat (.zip)
+            Attach Handwritten Diary Photos, Biodata PDFs, Screenshots, Voice Notes (.opus), Excel/CSV/Word, vCards (.vcf), or Chat (.zip)
           </div>
           <div style={{ fontSize: "0.78rem", color: "var(--color-ink-muted)", marginBottom: "0.65rem" }}>
-            Candidate portrait photos inside biodata PDFs are extracted automatically!
+            Handwritten Hindi/English multi-row registers &amp; portrait photos inside PDFs are extracted automatically!
           </div>
           <label className="btn btn-sm" style={{ cursor: "pointer" }}>
             Choose Files from Phone / Mac
             <input
               type="file"
               multiple
-              accept=".pdf,image/*,audio/*,.opus,.ogg,.m4a,.mp3,.wav,.aac,.webm,.zip"
+              accept=".pdf,image/*,audio/*,.opus,.ogg,.m4a,.mp3,.wav,.aac,.webm,.zip,.vcf,.csv,.tsv,.docx,.xlsx"
               style={{ display: "none" }}
               onChange={handleFileSelect}
             />

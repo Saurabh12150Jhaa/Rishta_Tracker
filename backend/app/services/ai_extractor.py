@@ -5,7 +5,12 @@ from typing import Any, Optional
 import httpx
 from ..config import ZLLAMA_API_KEY, ZLLAMA_BASE_URL, MODEL_PRESETS
 from ..db import get_app_settings
-from .dedupe import build_profile_embedding_text
+from .dedupe import (
+    build_profile_embedding_text,
+    find_duplicate_candidates,
+    normalize_name,
+    normalize_phone,
+)
 from .offline_extractor import (
     offline_compare_profiles,
     offline_extract_rishta_bundle,
@@ -173,6 +178,7 @@ def extract_rishta_bundle(
     source_name: Optional[str] = None,
     source_channel: Optional[str] = None,
     existing_profile: Optional[dict] = None,
+    existing_profiles_catalog: Optional[list[dict]] = None,
 ) -> dict:
     preset = get_active_preset_config()
     settings = get_app_settings()
@@ -203,24 +209,49 @@ def extract_rishta_bundle(
             if v not in (None, "", [], "{}") and k not in ("embedding_json", "private_notes")
         }
 
-    vision_prompt = f"""You are an elite Indian Matrimonial (Rishta) Intelligence Extractor.
-Extract structured candidate facts from the provided WhatsApp text, biodata PDF text/page images, and Hinglish call/voice transcripts.
+    vision_prompt = f"""You are an elite Indian Matrimonial (Rishta) Intelligence & Handwritten Register Vision Extractor.
+Extract structured candidate facts from the provided WhatsApp text, biodata PDF text/page images, handwritten Hindi/English diary/notebook lists, spreadsheets, and Hinglish call/voice transcripts.
 
-STRICT ANTI-HALLUCINATION RULES:
+STRICT ANTI-HALLUCINATION & HANDWRITTEN REGISTER RULES:
 1. NEVER invent or guess values that are not explicitly present in the inputs. Use null if a field is not mentioned.
-2. Convert Hinglish/Hindi terms accurately (e.g., 'Maanglik'/'Anshik Manglik', 'Gotra', 'Janam samay' -> time_of_birth, 'Janam sthan' -> place_of_birth, package/CTC in LPA).
-3. If updating an existing profile, extract ONLY the newly discovered or updated facts from this interaction while keeping consistency with the existing profile snapshot.
+2. Convert Hinglish/Hindi/Devanagari terms accurately:
+   - Names written in Hindi/Devanagari MUST be transliterated to English with Hindi in parentheses, e.g. "Anand Chinmay (आनंद चिनमय)", "Rishabh Tiwari (रिशभ तिवारी)", "Paras Sharma (पारस शर्मा)".
+   - Hindi city/state names MUST be translated to standard English, e.g. वाराणसी -> "Varanasi", लखनऊ -> "Lucknow", गोरखपुर -> "Gorakhpur", बैंगलोर -> "Bangalore", नई दिल्ली / दिल्ली -> "New Delhi", बिजनौर -> "Bijnor", सीतापुर -> "Sitapur", गुड़गाँव -> "Gurgaon", महाराष्ट्र -> "Maharashtra", नोयडा -> "Noida", ग्वालियर -> "Gwalior", MP -> "Madhya Pradesh".
+   - Decode Indian family register sibling shorthand codes into `siblings_details`:
+     * `1B` -> "1 Brother", `2B` -> "2 Brothers", `1S` -> "1 Sister", `2S` -> "2 Sisters", `3S` -> "3 Sisters", `1B 1S` / `1B, 1S` -> "1 Brother, 1 Sister".
+   - Decode Indian register profession shorthand codes into `occupation`:
+     * `SP` -> "Software Professional", `IT` -> "IT Professional", `PM` -> "Product Manager", `CA` -> "Chartered Accountant", `QAE` -> "QA Engineer", `PL` -> "Project Lead", `S.M` / `SM` -> "Senior Manager", `Busi` -> "Business", `Man` / `Mang` -> "Manager", `Cont` -> "Consultant".
+   - Detect visual strikethroughs: if a handwritten row has a horizontal line crossed through it (struck out), set `"is_crossed_out": true` on that row!
+3. MULTI-ROW LIST / DIARY REGISTER MODE:
+   - If the uploaded image(s), spreadsheet, or text contains **MULTIPLE distinct candidates/rows** (e.g. a handwritten diary page listing 5 to 30 candidates with names, phone numbers, cities, sibling codes, and job codes), set `"is_multi_candidate_list": true` and populate `"bulk_candidates"` with EVERY SINGLE ROW from all uploaded images!
 
 Partner Preferences & Criteria for Evaluation:
 {json.dumps(prefs, indent=2)}
 
-Existing Profile Snapshot (if updating):
-{json.dumps(existing_snapshot, indent=2) if existing_snapshot else "None (New Candidate)"}
+Existing Profile Snapshot (if updating a single profile):
+{json.dumps(existing_snapshot, indent=2) if existing_snapshot else "None (New Candidate or Bulk Register)"}
 
 Source Hint: source_name={source_name!r}, source_channel={source_channel!r}
 
 Return a valid JSON object matching this EXACT structure:
 {{
+  "is_multi_candidate_list": false,
+  "bulk_candidates": [
+    {{
+      "full_name": "English Name (हिंदी नाम)",
+      "primary_contact_phone": "10-digit phone or null",
+      "current_city": "City in English or null",
+      "siblings_details": "e.g. 1 Brother, 1 Sister or null",
+      "occupation": "Decoded occupation e.g. Software Professional, Chartered Accountant, Product Manager or null",
+      "company": "Company if mentioned or null",
+      "annual_ctc": "CTC if mentioned or null",
+      "age": null,
+      "height": null,
+      "gotra": null,
+      "is_crossed_out": false,
+      "raw_row_notes": "Original row text / shorthand codes e.g. '1B SP'"
+    }}
+  ],
   "extracted_fields": {{
     "full_name": "string or null",
     "gender": "Female | Male | null",
@@ -263,7 +294,7 @@ Return a valid JSON object matching this EXACT structure:
     "linkedin_or_social": "LinkedIn/Instagram handle or URL if mentioned or null"
   }},
   "field_provenance": {{
-    "field_name": "Biodata PDF | WhatsApp Message | Voice Note | Call Note"
+    "field_name": "Biodata PDF | Handwritten Diary | WhatsApp Message | Voice Note"
   }},
   "interaction_summary": "Concise 2-3 sentence summary of what was received or discussed in this import/note."
 }}
@@ -303,6 +334,133 @@ Return a valid JSON object matching this EXACT structure:
         )
 
     extracted_fields = (vision_json.get("extracted_fields") if isinstance(vision_json, dict) else {}) or {}
+    bulk_raw = (vision_json.get("bulk_candidates") if isinstance(vision_json, dict) else None) or []
+
+    # Handle Multi-Row Handwritten Diary / Register / Table / Spreadsheet Lists!
+    if isinstance(bulk_raw, list) and len(bulk_raw) >= 2:
+        enriched_bulk = []
+        new_count = 0
+        existing_match_count = 0
+        crossed_out_count = 0
+
+        for idx, row_item in enumerate(bulk_raw):
+            if not isinstance(row_item, dict) or not row_item.get("full_name"):
+                continue
+            r_fields = {
+                "full_name": row_item.get("full_name"),
+                "gender": "Male",
+                "primary_contact_phone": row_item.get("primary_contact_phone"),
+                "current_city": row_item.get("current_city"),
+                "siblings_details": row_item.get("siblings_details"),
+                "occupation": row_item.get("occupation"),
+                "company": row_item.get("company"),
+                "annual_ctc": row_item.get("annual_ctc"),
+                "age": row_item.get("age"),
+                "height": row_item.get("height"),
+                "gotra": row_item.get("gotra"),
+                "source_name": source_name or "Family Diary / Register",
+                "source_channel": source_channel or "Relative",
+            }
+            is_crossed = bool(row_item.get("is_crossed_out"))
+            r_fields["status"] = "Passed" if is_crossed else "New"
+            if is_crossed:
+                r_fields["pass_reason"] = "Crossed out in family diary register"
+                r_fields["ball_in_court"] = "closed"
+                crossed_out_count += 1
+            else:
+                r_fields["ball_in_court"] = "us"
+
+            r_fields["disambiguation_tag"] = build_disambiguation_tag(r_fields)
+
+            # Cross-check against existing profiles in database (local or catalog passed from Cloud)
+            matched_id = None
+            matched_name = None
+            match_reasons = []
+            if existing_profiles_catalog is not None:
+                r_phone = normalize_phone(r_fields.get("primary_contact_phone"))
+                r_name = normalize_name(r_fields.get("full_name"))
+                for ep in existing_profiles_catalog:
+                    ep_phones = {
+                        normalize_phone(ep.get("primary_contact_phone")),
+                        normalize_phone(ep.get("candidate_phone")),
+                    } - {""}
+                    ep_name = normalize_name(ep.get("full_name"))
+                    if r_phone and len(r_phone) >= 10 and r_phone in ep_phones:
+                        matched_id = ep["id"]
+                        matched_name = ep.get("full_name")
+                        match_reasons.append(f"Phone match ({r_phone})")
+                        break
+                    if r_name and ep_name and (r_name == ep_name or (len(r_name) > 5 and r_name in ep_name)):
+                        matched_id = ep["id"]
+                        matched_name = ep.get("full_name")
+                        match_reasons.append("Name match")
+                        break
+            else:
+                dups = find_duplicate_candidates(r_fields)
+                if dups and dups[0]["confidence"] >= 0.45:
+                    matched_id = dups[0]["profile_id"]
+                    matched_name = dups[0]["full_name"]
+                    match_reasons = dups[0].get("reasons") or ["Existing match"]
+
+            if matched_id:
+                existing_match_count += 1
+                match_status = "existing_match"
+            else:
+                new_count += 1
+                match_status = "crossed_out" if is_crossed else "new_profile"
+
+            enriched_bulk.append(
+                {
+                    "row_index": idx + 1,
+                    "selected": True,
+                    "match_status": match_status,
+                    "matched_profile_id": matched_id,
+                    "matched_profile_name": matched_name,
+                    "match_reasons": match_reasons,
+                    "is_crossed_out": is_crossed,
+                    "raw_row_notes": row_item.get("raw_row_notes") or "",
+                    "fields": r_fields,
+                }
+            )
+
+        if len(enriched_bulk) >= 2:
+            first_f = dict(enriched_bulk[0]["fields"])
+            first_f["full_name"] = f"Diary / Register Batch ({len(enriched_bulk)} Candidates)"
+            return {
+                "is_multi_candidate_list": True,
+                "bulk_candidates": enriched_bulk,
+                "bulk_stats": {
+                    "total_rows": len(enriched_bulk),
+                    "new_profiles_count": new_count,
+                    "existing_matches_count": existing_match_count,
+                    "crossed_out_count": crossed_out_count,
+                },
+                "extracted_fields": first_f,
+                "field_provenance": {"bulk_register": "Handwritten Diary / Multi-Row Vision OCR"},
+                "interaction_summary": (
+                    f"Extracted {len(enriched_bulk)} candidates from multi-row register/image "
+                    f"({new_count} New Profiles to create, {existing_match_count} Existing Profiles matched, "
+                    f"{crossed_out_count} Crossed-Out rows detected)."
+                ),
+                "voice_transcript": combined_voice_transcript,
+                "gotra_clash_alert": None,
+                "ai_fit_score": 80,
+                "fit_summary": (
+                    f"Multi-candidate register extracted via {vision_model}: "
+                    f"{new_count} brand-new candidates ready to create and {existing_match_count} matched against existing profiles."
+                ),
+                "positives": [f"{len(enriched_bulk)} rows decoded (Hindi names, phones, cities, sibling & job codes)"],
+                "concerns": [f"{crossed_out_count} row(s) had strikethrough lines and are pre-marked as Passed"] if crossed_out_count else [],
+                "missing_questions": [],
+                "pre_call_brief": "",
+                "suggested_status": "New",
+                "suggested_ball_in_court": "us",
+                "suggested_follow_up": {"task": "Review & approve bulk register candidates", "due_days": 2, "assigned_to": "Family"},
+                "draft_whatsapp_replies": {},
+                "embedding": None,
+                "models_used": models_used,
+            }
+
     if source_name and not extracted_fields.get("source_name"):
         extracted_fields["source_name"] = source_name
     if source_channel and not extracted_fields.get("source_channel"):

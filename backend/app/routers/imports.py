@@ -18,6 +18,7 @@ from ..services.ai_extractor import (
 from ..services.dedupe import build_profile_embedding_text, find_duplicate_candidates
 from ..services.media_proc import (
     image_bytes_to_data_url,
+    parse_structured_file_to_text,
     process_pdf_biodata,
     save_uploaded_bytes,
     transcode_audio_to_mp3_b64,
@@ -244,7 +245,7 @@ def _create_single_import_job(
         )
         remote_online, _, _ = is_remote_mac_worker_online()
         if remote_online:
-            live_res = wait_for_worker_task(task_id, timeout_seconds=18.0)
+            live_res = wait_for_worker_task(task_id, timeout_seconds=38.0)
             if live_res:
                 ai_bundle = live_res
                 duplicates = ai_bundle.get("duplicate_matches") or duplicates
@@ -301,23 +302,31 @@ async def process_import(
         elif ext in (".jpg", ".jpeg", ".png", ".webp", ".heic") or ctype.startswith("image/"):
             p, u = save_uploaded_bytes(content, up.filename, "photos")
             image_items.append((p, u, up.filename))
-        elif ext in (".opus", ".ogg", ".m4a", ".mp3", ".wav", ".aac", ".webm") or ctype.startswith("audio/"):
+        elif ext in (".opus", ".ogg", ".m4a", ".mp3", ".wav", ".aac", ".webm", ".amr") or ctype.startswith("audio/"):
             p, u = save_uploaded_bytes(content, up.filename, "voice")
             audio_items.append((p, u, up.filename))
+        elif ext in (".vcf", ".csv", ".tsv", ".docx", ".xlsx"):
+            parsed_doc = parse_structured_file_to_text(content, up.filename)
+            if parsed_doc:
+                zip_chat_texts.append(parsed_doc)
 
     combined_text = "\n\n".join(t for t in [raw_text, *zip_chat_texts] if t and t.strip())
     if not combined_text and not pdf_items and not image_items and not audio_items:
-        raise HTTPException(status_code=400, detail="Please provide WhatsApp text, a biodata PDF, photo, voice note, or .zip export.")
+        raise HTTPException(status_code=400, detail="Please provide WhatsApp text, a biodata PDF, photo/diary image, voice note, .vcf/.csv/.xlsx/.docx, or .zip export.")
 
     created_jobs = []
 
-    # Smart AI Segregation & Existing-Profile Auto-Linking when no manual target_profile_id is locked
-    if not target_profile_id and (
-        mode in ("auto", "batch")
-        or len(pdf_items) > 1
-        or len(zip_chat_texts) > 0
-        or len(audio_items) > 0
-        or len(combined_text) > 80
+    # Smart AI Text/PDF Segregation when multiple PDFs, .zip, or long text/voice are uploaded
+    # (Note: when images/diary pages are uploaded without multi-PDFs, _create_single_import_job handles Vision + Bulk Register extraction directly!)
+    if (
+        not target_profile_id
+        and not image_items
+        and (
+            len(pdf_items) > 1
+            or len(zip_chat_texts) > 0
+            or len(audio_items) > 0
+            or len(combined_text) > 80
+        )
     ):
         conn = get_conn()
         existing_rows = [dict(r) for r in conn.execute("SELECT * FROM profiles").fetchall()]
@@ -668,6 +677,114 @@ def apply_import_job(job_id: int, req: ApplyImportRequest, member: dict = Depend
     conn.commit()
     conn.close()
     return {"ok": True, "profile_id": profile_id}
+
+
+@router.post("/{job_id}/apply-batch")
+def apply_bulk_register_import_job(
+    job_id: int,
+    payload: dict,
+    member: dict = Depends(get_current_member),
+):
+    """
+    Applies a Multi-Row Handwritten Diary / Register / Spreadsheet batch import in 1 click:
+      - Updates existing profiles for rows where `matched_profile_id` is set.
+      - Creates new profiles for rows where `matched_profile_id` is null.
+    """
+    conn = get_conn()
+    job_row = conn.execute("SELECT * FROM import_jobs WHERE id = ?", (job_id,)).fetchone()
+    if not job_row:
+        conn.close()
+        raise HTTPException(status_code=404, detail="Import job not found")
+
+    job = dict(job_row)
+    try:
+        extracted = json.loads(job.get("extracted_json") or "{}")
+    except Exception:
+        extracted = {}
+
+    rows_to_apply = payload.get("rows")
+    if rows_to_apply is None:
+        rows_to_apply = [r for r in (extracted.get("bulk_candidates") or []) if r.get("selected", True)]
+
+    now = utc_now()
+    created_ids: list[int] = []
+    updated_ids: list[int] = []
+
+    for r in rows_to_apply:
+        if not r.get("selected", True):
+            continue
+        fields = dict(r.get("fields") or {})
+        name = (fields.get("full_name") or "").strip()
+        if not name:
+            continue
+
+        matched_id = r.get("matched_profile_id")
+        if matched_id:
+            ex_row = conn.execute("SELECT * FROM profiles WHERE id = ?", (matched_id,)).fetchone()
+            if ex_row:
+                ex = dict(ex_row)
+                updates = {}
+                for k, v in fields.items():
+                    if k in PROFILE_EDITABLE_FIELDS and v not in (None, "") and not ex.get(k):
+                        updates[k] = v
+                merged = {**ex, **updates}
+                updates["disambiguation_tag"] = build_disambiguation_tag(merged)
+                updates["updated_at"] = now
+                set_clause = ", ".join(f"{col} = ?" for col in updates.keys())
+                conn.execute(f"UPDATE profiles SET {set_clause} WHERE id = ?", (*updates.values(), matched_id))
+                updated_ids.append(matched_id)
+                continue
+
+        # Create New Profile for non-existing candidate
+        insert_data = {
+            col: fields.get(col)
+            for col in PROFILE_EDITABLE_FIELDS
+            if fields.get(col) not in (None, "")
+        }
+        insert_data["full_name"] = name
+        insert_data["gender"] = insert_data.get("gender") or "Male"
+        insert_data["status"] = insert_data.get("status") or ("Passed" if r.get("is_crossed_out") else "New")
+        insert_data["ball_in_court"] = insert_data.get("ball_in_court") or ("closed" if r.get("is_crossed_out") else "us")
+        if r.get("is_crossed_out") and not insert_data.get("pass_reason"):
+            insert_data["pass_reason"] = "Crossed out in family diary register"
+        insert_data["source_name"] = insert_data.get("source_name") or job.get("source_name") or "Family Diary"
+        insert_data["source_channel"] = insert_data.get("source_channel") or job.get("source_channel") or "Relative"
+        insert_data["disambiguation_tag"] = build_disambiguation_tag(insert_data)
+        insert_data["fit_summary"] = (
+            f"Imported from family diary/register ({r.get('raw_row_notes') or insert_data['disambiguation_tag']})."
+        )
+        insert_data["ai_fit_score"] = 45 if r.get("is_crossed_out") else 78
+        insert_data["positives_json"] = json.dumps(
+            [x for x in [insert_data.get("occupation"), insert_data.get("current_city"), insert_data.get("siblings_details")] if x]
+        )
+        insert_data["concerns_json"] = json.dumps(
+            ["Crossed out in family diary"] if r.get("is_crossed_out") else []
+        )
+        insert_data["missing_questions_json"] = json.dumps(
+            ["Ask for full Biodata PDF & Kundli birth details (DOB/TOB/POB)"]
+        )
+        insert_data["created_by_member"] = member["name"]
+        insert_data["created_at"] = now
+        insert_data["updated_at"] = now
+
+        cols = list(insert_data.keys())
+        placeholders = ", ".join("?" for _ in cols)
+        cur = conn.execute(
+            f"INSERT INTO profiles ({', '.join(cols)}) VALUES ({placeholders})",
+            tuple(insert_data[c] for c in cols),
+        )
+        created_ids.append(cur.lastrowid)
+
+    conn.execute("UPDATE import_jobs SET status = 'applied' WHERE id = ?", (job_id,))
+    conn.commit()
+    conn.close()
+    return {
+        "ok": True,
+        "created_count": len(created_ids),
+        "updated_count": len(updated_ids),
+        "created_profile_ids": created_ids,
+        "updated_profile_ids": updated_ids,
+    }
 
 
 @router.post("/{job_id}/reject")
