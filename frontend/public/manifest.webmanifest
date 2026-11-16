@@ -1,0 +1,45 @@
+{
+  "name": "Rishta Dossier — Family AI Tracker",
+  "short_name": "Rishta Dossier",
+  "description": "Private Mac-hosted multimodal AI rishta tracker for Android & Mac",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#f7f3eb",
+  "theme_color": "#9e3b24",
+  "orientation": "portrait-primary",
+  "icons": [
+    {
+      "src": "/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ],
+  "share_target": {
+    "action": "/share-target",
+    "method": "POST",
+    "enctype": "multipart/form-data",
+    "params": {
+      "title": "title",
+      "text": "text",
+      "url": "url",
+      "files": [
+        {
+          "name": "files",
+          "accept": [
+            "application/pdf",
+            "image/*",
+            "audio/*",
+            ".opus",
+            ".ogg",
+            ".m4a",
+            ".mp3",
+            ".wav",
+            ".zip",
+            "application/zip"
+          ]
+        }
+      ]
+    }
+  }
+}

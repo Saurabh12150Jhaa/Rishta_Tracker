@@ -1,0 +1,35 @@
+# Secrets & environment
+.env
+.env.*
+!.env.example
+
+# Local databases & user media
+data/
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.db
+
+# Local TLS certificates
+certs/*.pem
+certs/*.key
+certs/*.crt
+certs/*.srl
+certs/*.csr
+certs/*.cnf
+*.tsbuildinfo
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+backend/.venv/
+.pytest_cache/
+
+# Frontend / Bun / Node
+node_modules/
+frontend/node_modules/
+frontend/dist/
+dist/
+.DS_Store
+*.log

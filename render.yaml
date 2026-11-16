@@ -1,0 +1,14 @@
+services:
+  - type: web
+    name: sister-rishta-dossier
+    runtime: docker
+    plan: free
+    envVars:
+      - key: SESSION_SECRET
+        generateValue: true
+      - key: WORKER_SHARED_SECRET
+        value: rishta-mac-worker-secret-9d4e2a7b1c8f
+      - key: OWNER_DEFAULT_PIN
+        value: "1234"
+      - key: FAMILY_DEFAULT_PIN
+        value: "0000"
