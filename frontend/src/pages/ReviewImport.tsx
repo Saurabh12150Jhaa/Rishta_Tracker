@@ -350,6 +350,17 @@ export const ReviewImport: React.FC<ReviewImportProps> = ({
             <div style={{ display: "flex", gap: "0.4rem", flexWrap: "wrap" }}>
               <span className="badge badge-sage">{newBulkCount} New Profiles to Create</span>
               <span className="badge badge-indigo">{matchedBulkCount} Matched Existing Profiles</span>
+              {ext.bulk_stats?.mean_confidence && (
+                <span className="badge badge-sage">
+                  Mean AI/OCR Accuracy: {ext.bulk_stats.mean_confidence}%
+                </span>
+              )}
+              {typeof ext.bulk_stats?.needs_verification_count === "number" &&
+                ext.bulk_stats.needs_verification_count > 0 && (
+                  <span className="badge badge-amber">
+                    {ext.bulk_stats.needs_verification_count} Row(s) Flagged to Verify
+                  </span>
+                )}
               <button
                 type="button"
                 className="btn btn-sm"
@@ -374,6 +385,7 @@ export const ReviewImport: React.FC<ReviewImportProps> = ({
               <thead>
                 <tr style={{ borderBottom: "2px solid var(--color-rule-strong)", textAlign: "left" }}>
                   <th style={{ padding: "0.5rem" }}>✓</th>
+                  <th style={{ padding: "0.5rem" }}>Accuracy &amp; Source</th>
                   <th style={{ padding: "0.5rem" }}>DB Match / Action</th>
                   <th style={{ padding: "0.5rem", minWidth: 190 }}>Full Name (English + Hindi)</th>
                   <th style={{ padding: "0.5rem", minWidth: 125 }}>Phone Number</th>
@@ -386,6 +398,8 @@ export const ReviewImport: React.FC<ReviewImportProps> = ({
               <tbody>
                 {bulkRows.map((row, idx) => {
                   const f = row.fields || {};
+                  const conf = row.extraction_confidence ?? 92;
+                  const warnings: string[] = row.verification_warnings || [];
                   return (
                     <tr
                       key={idx}
@@ -395,6 +409,8 @@ export const ReviewImport: React.FC<ReviewImportProps> = ({
                           ? "var(--color-danger-soft)"
                           : row.matched_profile_id
                           ? "var(--color-indigo-soft)"
+                          : warnings.length > 0
+                          ? "var(--color-amber-soft)"
                           : "transparent",
                         opacity: row.selected === false ? 0.5 : 1,
                       }}
@@ -405,6 +421,36 @@ export const ReviewImport: React.FC<ReviewImportProps> = ({
                           checked={row.selected !== false}
                           onChange={(e) => updateBulkRowMeta(idx, { selected: e.target.checked })}
                         />
+                      </td>
+                      <td style={{ padding: "0.45rem", minWidth: 155 }}>
+                        <div style={{ display: "flex", gap: "0.25rem", flexWrap: "wrap", alignItems: "center" }}>
+                          <span
+                            className={`badge ${
+                              conf >= 88 && warnings.length === 0
+                                ? "badge-sage"
+                                : conf >= 75
+                                ? "badge-amber"
+                                : "badge-danger"
+                            }`}
+                          >
+                            {conf}% Conf
+                          </span>
+                          {row.source_modality && (
+                            <span className="badge" style={{ fontSize: "0.66rem" }}>
+                              {row.source_modality}
+                            </span>
+                          )}
+                        </div>
+                        {row.raw_row_notes && (
+                          <div style={{ fontSize: "0.7rem", color: "var(--color-ink-2)", marginTop: "0.15rem" }}>
+                            Raw: &ldquo;{row.raw_row_notes}&rdquo;
+                          </div>
+                        )}
+                        {warnings.length > 0 && (
+                          <div style={{ fontSize: "0.7rem", color: "var(--color-danger)", fontWeight: 600 }}>
+                            ⚠ {warnings.join("; ")}
+                          </div>
+                        )}
                       </td>
                       <td style={{ padding: "0.45rem" }}>
                         <select

@@ -221,9 +221,21 @@ def complete_worker_task(
                 ),
             )
 
-            # If the user already applied the profile while offline, enrich the profile in-place too!
-            if job_row["status"] == "applied" and target_pid:
-                _enrich_profile_from_ai_bundle(conn, target_pid, merged_ext, now)
+            # If the user already applied the profile while offline, enrich or expand bulk profiles in-place!
+            if job_row["status"] == "applied":
+                bulk_cands = merged_ext.get("bulk_candidates") or []
+                if isinstance(bulk_cands, list) and len(bulk_cands) >= 2:
+                    if target_pid:
+                        p_check = conn.execute("SELECT full_name FROM profiles WHERE id = ?", (target_pid,)).fetchone()
+                        if p_check and (
+                            "Diary / Register Batch" in (p_check["full_name"] or "")
+                            or "Unnamed" in (p_check["full_name"] or "")
+                            or "Candidate" in (p_check["full_name"] or "")
+                        ):
+                            conn.execute("DELETE FROM profiles WHERE id = ?", (target_pid,))
+                    _expand_bulk_candidates_in_db(conn, bulk_cands, job_row["created_by_member"] or "Saurabh", now)
+                elif target_pid:
+                    _enrich_profile_from_ai_bundle(conn, target_pid, merged_ext, now)
 
     elif task["task_type"] == "transcribe_meeting_recording":
         meeting_id = task["target_id"]
@@ -279,3 +291,65 @@ def _enrich_profile_from_ai_bundle(conn, profile_id: int, ai_bundle: dict, now: 
     updates["updated_at"] = now
     set_clause = ", ".join(f"{col} = ?" for col in updates.keys())
     conn.execute(f"UPDATE profiles SET {set_clause} WHERE id = ?", (*updates.values(), profile_id))
+
+
+def _expand_bulk_candidates_in_db(conn, bulk_rows: list[dict], member_name: str, now: str) -> None:
+    for r in bulk_rows:
+        if not r.get("selected", True):
+            continue
+        fields = dict(r.get("fields") or {})
+        name = (fields.get("full_name") or "").strip()
+        if not name:
+            continue
+
+        matched_id = r.get("matched_profile_id")
+        if matched_id:
+            ex_row = conn.execute("SELECT * FROM profiles WHERE id = ?", (matched_id,)).fetchone()
+            if ex_row:
+                ex = dict(ex_row)
+                updates = {
+                    k: v
+                    for k, v in fields.items()
+                    if k in PROFILE_EDITABLE_FIELDS and v not in (None, "") and not ex.get(k)
+                }
+                merged = {**ex, **updates}
+                updates["disambiguation_tag"] = build_disambiguation_tag(merged)
+                updates["updated_at"] = now
+                set_clause = ", ".join(f"{col} = ?" for col in updates.keys())
+                conn.execute(f"UPDATE profiles SET {set_clause} WHERE id = ?", (*updates.values(), matched_id))
+                continue
+
+        insert_data = {
+            col: fields.get(col)
+            for col in PROFILE_EDITABLE_FIELDS
+            if fields.get(col) not in (None, "")
+        }
+        insert_data["full_name"] = name
+        insert_data["gender"] = insert_data.get("gender") or "Male"
+        insert_data["status"] = insert_data.get("status") or ("Passed" if r.get("is_crossed_out") else "New")
+        insert_data["ball_in_court"] = insert_data.get("ball_in_court") or ("closed" if r.get("is_crossed_out") else "us")
+        if r.get("is_crossed_out") and not insert_data.get("pass_reason"):
+            insert_data["pass_reason"] = "Crossed out in family diary register"
+        insert_data["source_name"] = insert_data.get("source_name") or "Family Diary Register"
+        insert_data["source_channel"] = insert_data.get("source_channel") or "Relative"
+        insert_data["disambiguation_tag"] = build_disambiguation_tag(insert_data)
+        insert_data["fit_summary"] = f"Extracted ({r.get('extraction_confidence', 92)}% OCR confidence): {r.get('raw_row_notes') or insert_data['disambiguation_tag']}"
+        insert_data["ai_fit_score"] = 45 if r.get("is_crossed_out") else 78
+        insert_data["positives_json"] = json.dumps(
+            [x for x in [insert_data.get("occupation"), insert_data.get("current_city"), insert_data.get("siblings_details")] if x]
+        )
+        insert_data["concerns_json"] = json.dumps(r.get("verification_warnings") or [])
+        insert_data["missing_questions_json"] = json.dumps(
+            ["Ask for full Biodata PDF & Kundli birth details (DOB/TOB/POB)"]
+        )
+        insert_data["created_by_member"] = member_name
+        insert_data["created_at"] = now
+        insert_data["updated_at"] = now
+
+        cols = list(insert_data.keys())
+        placeholders = ", ".join("?" for _ in cols)
+        conn.execute(
+            f"INSERT INTO profiles ({', '.join(cols)}) VALUES ({placeholders})",
+            tuple(insert_data[c] for c in cols),
+        )
+

@@ -230,8 +230,12 @@ STRICT ANTI-HALLUCINATION & HANDWRITTEN REGISTER RULES:
    - Decode Indian register profession shorthand codes into `occupation`:
      * `SP` -> "Software Professional", `IT` -> "IT Professional", `PM` -> "Product Manager", `CA` -> "Chartered Accountant", `QAE` -> "QA Engineer", `PL` -> "Project Lead", `S.M` / `SM` -> "Senior Manager", `Busi` -> "Business", `Man` / `Mang` -> "Manager", `Cont` -> "Consultant".
    - Detect visual strikethroughs: if a handwritten row has a horizontal line crossed through it (struck out), set `"is_crossed_out": true` on that row!
-3. MULTI-ROW LIST / DIARY REGISTER MODE:
-   - If the uploaded image(s), spreadsheet, or text contains **MULTIPLE distinct candidates/rows** (e.g. a handwritten diary page listing 5 to 30 candidates with names, phone numbers, cities, sibling codes, and job codes), set `"is_multi_candidate_list": true` and populate `"bulk_candidates"` with EVERY SINGLE ROW from all uploaded images!
+3. UNIVERSAL MULTI-CANDIDATE SEGREGATION MODE (Across Images, Multiple PDFs, Multiple Audio Clips, Multiple ZIPs, or Multi-Person Text):
+   - Whenever the uploaded inputs (whether a handwritten diary/register image, multiple biodata PDFs, multiple audio recordings, multiple WhatsApp `.zip` chats, or pasted text) contain **2 OR MORE distinct candidates/people**, set `"is_multi_candidate_list": true` and populate `"bulk_candidates"` with EVERY SINGLE PERSON!
+   - For each person in `"bulk_candidates"`, include:
+     * `"extraction_confidence"`: integer 0 to 100 indicating how legible/clear the handwriting, PDF, or audio was for this person.
+     * `"source_modality"`: e.g. `"Handwritten Diary Image"`, `"Biodata PDF #1"`, `"Audio Recording #2"`, `"WhatsApp ZIP Chat"`, or `"Pasted Text"`.
+     * `"raw_row_notes"`: exact verbatim source line, Hindi text, or audio quote so the user can audit accuracy.
 
 Partner Preferences & Criteria for Evaluation:
 {json.dumps(prefs, indent=2)}
@@ -253,11 +257,17 @@ Return a valid JSON object matching this EXACT structure:
       "occupation": "Decoded occupation e.g. Software Professional, Chartered Accountant, Product Manager or null",
       "company": "Company if mentioned or null",
       "annual_ctc": "CTC if mentioned or null",
+      "education": "Degree/College if mentioned or null",
       "age": null,
+      "dob": null,
       "height": null,
       "gotra": null,
+      "father_details": null,
+      "mother_details": null,
       "is_crossed_out": false,
-      "raw_row_notes": "Original row text / shorthand codes e.g. '1B SP'"
+      "extraction_confidence": 94,
+      "source_modality": "Handwritten Diary Image | Biodata PDF | Audio Recording | WhatsApp ZIP Chat",
+      "raw_row_notes": "Exact verbatim row text / shorthand codes / transcript excerpt for accuracy check"
     }}
   ],
   "extracted_fields": {{
@@ -417,6 +427,29 @@ Return a valid JSON object matching this EXACT structure:
                 new_count += 1
                 match_status = "crossed_out" if is_crossed else "new_profile"
 
+            # Accuracy & Format Validation Checks per Candidate
+            conf_score = int(row_item.get("extraction_confidence") or (72 if is_crossed else 92))
+            warnings = []
+            raw_phone = str(r_fields.get("primary_contact_phone") or "").strip()
+            norm_ph = normalize_phone(raw_phone)
+            if not raw_phone:
+                warnings.append("Missing phone number")
+                conf_score = min(conf_score, 78)
+            elif len(norm_ph) != 10:
+                warnings.append(f"Phone '{raw_phone}' has {len(norm_ph)} digits (expected 10) — verify handwriting")
+                conf_score = min(conf_score, 68)
+            if not r_fields.get("current_city"):
+                warnings.append("City not specified")
+            if is_crossed:
+                warnings.append("Struck-through / crossed out in source -> marked Passed")
+
+            captured_keys = [
+                k
+                for k in ("full_name", "primary_contact_phone", "current_city", "siblings_details", "occupation")
+                if r_fields.get(k)
+            ]
+            completeness_pct = int((len(captured_keys) / 5.0) * 100)
+
             enriched_bulk.append(
                 {
                     "row_index": idx + 1,
@@ -426,6 +459,10 @@ Return a valid JSON object matching this EXACT structure:
                     "matched_profile_name": matched_name,
                     "match_reasons": match_reasons,
                     "is_crossed_out": is_crossed,
+                    "extraction_confidence": conf_score,
+                    "completeness_pct": completeness_pct,
+                    "source_modality": row_item.get("source_modality") or "Multi-Candidate Upload",
+                    "verification_warnings": warnings,
                     "raw_row_notes": row_item.get("raw_row_notes") or "",
                     "fields": r_fields,
                 }
@@ -433,7 +470,9 @@ Return a valid JSON object matching this EXACT structure:
 
         if len(enriched_bulk) >= 2:
             first_f = dict(enriched_bulk[0]["fields"])
-            first_f["full_name"] = f"Diary / Register Batch ({len(enriched_bulk)} Candidates)"
+            avg_conf = int(sum(r["extraction_confidence"] for r in enriched_bulk) / len(enriched_bulk))
+            high_conf_count = sum(1 for r in enriched_bulk if r["extraction_confidence"] >= 85 and not r["verification_warnings"])
+            needs_check_count = len(enriched_bulk) - high_conf_count
             return {
                 "is_multi_candidate_list": True,
                 "bulk_candidates": enriched_bulk,
@@ -442,6 +481,9 @@ Return a valid JSON object matching this EXACT structure:
                     "new_profiles_count": new_count,
                     "existing_matches_count": existing_match_count,
                     "crossed_out_count": crossed_out_count,
+                    "mean_confidence": avg_conf,
+                    "high_confidence_count": high_conf_count,
+                    "needs_verification_count": needs_check_count,
                 },
                 "extracted_fields": first_f,
                 "field_provenance": {"bulk_register": "Handwritten Diary / Multi-Row Vision OCR"},

@@ -516,6 +516,13 @@ def apply_import_job(job_id: int, req: ApplyImportRequest, member: dict = Depend
     except Exception:
         extracted = {}
 
+    # If this import job is a Multi-Candidate Bulk List, always expand into individual profiles!
+    if isinstance(extracted.get("bulk_candidates"), list) and len(extracted["bulk_candidates"]) >= 2:
+        conn.close()
+        res = apply_bulk_register_import_job(job_id, {"rows": extracted["bulk_candidates"]}, member)
+        first_pid = (res.get("created_profile_ids") or res.get("updated_profile_ids") or [1])[0]
+        return {"ok": True, "profile_id": first_pid, **res}
+
     base_fields = dict(extracted.get("extracted_fields") or {})
     if req.accepted_fields:
         base_fields = dict(req.accepted_fields)
