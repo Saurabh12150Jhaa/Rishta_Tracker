@@ -1,7 +1,7 @@
 import hmac
 import json
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
 from fastapi import APIRouter, Depends, Header, HTTPException
@@ -112,13 +112,15 @@ def poll_next_worker_task(
         (now, hostname),
     )
 
+    stale_cutoff = (datetime.now(timezone.utc) - timedelta(seconds=45)).isoformat()
     task_row = conn.execute(
         """
         SELECT * FROM worker_tasks
-        WHERE status = 'pending'
+        WHERE status = 'pending' OR (status = 'processing' AND updated_at < ?)
         ORDER BY id ASC
         LIMIT 1
-        """
+        """,
+        (stale_cutoff,),
     ).fetchone()
 
     if not task_row:

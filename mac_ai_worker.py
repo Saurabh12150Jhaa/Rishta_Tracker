@@ -3,9 +3,9 @@
 Outbound-Only Mac AI Worker for Sister's Rishta Dossier.
 - Runs on your Zscaler-connected Mac with ZERO listening ports and ZERO reverse tunnels.
 - Polls your permanent Cloud Web App over standard outbound HTTPS:
-    GET/POST https://<your-cloud-app>/api/worker/poll
+    POST https://<your-cloud-app>/api/worker/poll
 - Calls https://zllama.corp.zscaler.com/v1 locally on your Mac using ZLLAMA_API_KEY.
-- Pushes the extracted JSON, Hinglish voice transcript, and embeddings back over outbound HTTPS.
+- Pushes the extracted JSON, Hinglish voice transcript, and bulk diary rows back over outbound HTTPS.
 """
 import os
 import socket
@@ -56,30 +56,31 @@ def process_queued_task(cloud_url: str, headers: dict, task: dict, existing_prof
             if not mid:
                 continue
             try:
-                with httpx.Client(timeout=30.0, verify=SSL_CTX) as client:
+                with httpx.Client(timeout=40.0, verify=SSL_CTX) as client:
                     r = client.get(f"{cloud_url}/api/worker/media/{mid}", headers=headers)
                     r.raise_for_status()
                     disp = r.headers.get("content-disposition", "")
+                    ctype = (r.headers.get("content-type") or "").lower()
                     fname = f"asset_{mid}.bin"
                     if "filename=" in disp:
-                        fname = disp.split("filename=")[-1].strip("\"' ")
+                        fname = disp.split("filename=")[-1].strip("\"' ;")
                     fpath = tmp_path / fname
                     fpath.write_bytes(r.content)
 
                     ext = fpath.suffix.lower()
-                    if ext == ".pdf":
+                    if ext == ".pdf" or "pdf" in ctype:
                         pdf_res = process_pdf_biodata(fpath)
                         if pdf_res["text"] and pdf_res["text"] not in pdf_texts:
                             pdf_texts.append(pdf_res["text"])
                         image_data_urls.extend(pdf_res["page_images"])
-                    elif ext in (".jpg", ".jpeg", ".png", ".webp"):
+                    elif ext in (".jpg", ".jpeg", ".png", ".webp", ".heic") or "image" in ctype:
                         image_data_urls.append(image_bytes_to_data_url(r.content))
-                    elif ext in (".opus", ".ogg", ".m4a", ".mp3", ".wav", ".aac", ".webm", ".amr"):
+                    elif ext in (".opus", ".ogg", ".m4a", ".mp3", ".wav", ".aac", ".webm", ".amr") or "audio" in ctype:
                         mp3_b64 = transcode_audio_to_mp3_b64(fpath)
                         if mp3_b64:
                             audio_mp3_b64_list.append(mp3_b64)
             except Exception as exc:
-                print(f"[Worker] Warning downloading media #{mid}: {exc}")
+                print(f"[Worker] Warning downloading media #{mid}: {exc}", flush=True)
 
     ai_bundle = extract_rishta_bundle(
         raw_text=raw_text,
@@ -102,13 +103,13 @@ def run_worker_loop(cloud_url: str) -> None:
         "Content-Type": "application/json",
     }
 
-    print("============================================================")
-    print("  Rishta Dossier — Outbound-Only Zscaler Mac AI Worker")
-    print("  Listening Ports on Mac : ZERO (100% Outbound HTTPS Only)")
-    print(f"  Target Cloud Dashboard : {cloud_url}")
-    print(f"  Mac Hostname           : {hostname}")
-    print(f"  zllama Key Configured  : {'YES' if ZLLAMA_API_KEY else 'NO'}")
-    print("============================================================")
+    print("============================================================", flush=True)
+    print("  Rishta Dossier — Outbound-Only Zscaler Mac AI Worker", flush=True)
+    print("  Listening Ports on Mac : ZERO (100% Outbound HTTPS Only)", flush=True)
+    print(f"  Target Cloud Dashboard : {cloud_url}", flush=True)
+    print(f"  Mac Hostname           : {hostname}", flush=True)
+    print(f"  zllama Key Configured  : {'YES' if ZLLAMA_API_KEY else 'NO'}", flush=True)
+    print("============================================================", flush=True)
 
     while True:
         try:
@@ -125,32 +126,32 @@ def run_worker_loop(cloud_url: str) -> None:
             if task:
                 tid = task["id"]
                 ttype = task["task_type"]
-                print(f"[Worker] Picked up task #{tid} ({ttype}) — processing via zllama...")
+                print(f"[Worker] Picked up task #{tid} ({ttype}) — processing via zllama...", flush=True)
                 ai_bundle = process_queued_task(
                     cloud_url, headers, task, data.get("existing_profiles") or []
                 )
-                with httpx.Client(timeout=20.0, verify=SSL_CTX) as client:
+                with httpx.Client(timeout=30.0, verify=SSL_CTX) as client:
                     c_resp = client.post(
                         f"{cloud_url}/api/worker/tasks/{tid}/complete",
                         headers=headers,
                         json={"ai_bundle": ai_bundle},
                     )
                     c_resp.raise_for_status()
-                print(f"[Worker] Completed task #{tid} ({ai_bundle.get('models_used')}) ✓")
+                print(f"[Worker] Completed task #{tid} ({ai_bundle.get('models_used')}) ✓", flush=True)
                 continue
         except KeyboardInterrupt:
-            print("\n[Worker] Stopped by user.")
+            print("\n[Worker] Stopped by user.", flush=True)
             break
         except Exception as exc:
-            print(f"[Worker] Poll check note: {exc}")
+            print(f"[Worker] Poll check note: {exc}", flush=True)
 
-        time.sleep(3.5)
+        time.sleep(3.0)
 
 
 if __name__ == "__main__":
     target_url = (
         sys.argv[1]
         if len(sys.argv) > 1
-        else os.getenv("CLOUD_SERVER_URL", "http://127.0.0.1:8080")
+        else os.getenv("CLOUD_SERVER_URL", "https://sister-rishta-dossier.onrender.com")
     )
     run_worker_loop(target_url)

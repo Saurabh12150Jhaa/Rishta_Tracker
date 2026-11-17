@@ -12,10 +12,22 @@ if [[ -f "$ROOT_DIR/.env" ]]; then
   set +a
 fi
 
+HTTP_PORT="${HTTP_PORT:-8080}"
+HTTPS_PORT="${HTTPS_PORT:-8443}"
+
 echo "============================================================"
 echo "  Sister's Rishta Dossier — Mac AI Worker + Local Server"
 echo "  (100% Zscaler Policy Compliant — Outbound Worker Only)"
 echo "============================================================"
+
+# 0. Clean up any old instances holding ports 8080/8443 or old worker processes
+OLD_PIDS="$(lsof -tiTCP:${HTTP_PORT},${HTTPS_PORT} -sTCP:LISTEN 2>/dev/null || true)"
+if [[ -n "$OLD_PIDS" ]]; then
+  echo "[Setup] Stopping previous server instance on ports ${HTTP_PORT}/${HTTPS_PORT}..."
+  echo "$OLD_PIDS" | xargs kill -9 2>/dev/null || true
+  sleep 1
+fi
+pkill -f "mac_ai_worker.py" 2>/dev/null || true
 
 # 1. Generate / verify local LAN TLS certificates for current IP
 python3 "$ROOT_DIR/certs/generate_certs.py" --force
@@ -26,8 +38,6 @@ if [[ ! -d "$ROOT_DIR/frontend/dist" ]] || [[ "${1:-}" == "--build" ]]; then
   (cd "$ROOT_DIR/frontend" && bun run build)
 fi
 
-HTTP_PORT="${HTTP_PORT:-8080}"
-HTTPS_PORT="${HTTPS_PORT:-8443}"
 LAN_IP="$(python3 -c 'import socket; s=socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.connect(("8.8.8.8",80)); print(s.getsockname()[0]); s.close()' 2>/dev/null || echo "127.0.0.1")"
 MDNS_HOST="$(scutil --get LocalHostName 2>/dev/null || hostname)"
 
@@ -41,10 +51,10 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-# Start Outbound-Only Mac AI Worker polling https://sister-rishta-dossier.onrender.com
+# Start Outbound-Only Mac AI Worker (unbuffered -u so logs appear immediately)
 if [[ -n "${CLOUD_SERVER_URL:-}" ]]; then
   caffeinate -dimsu /opt/homebrew/bin/uv run --directory "$ROOT_DIR/backend" \
-    python "$ROOT_DIR/mac_ai_worker.py" "$CLOUD_SERVER_URL" &
+    python -u "$ROOT_DIR/mac_ai_worker.py" "$CLOUD_SERVER_URL" &
   WORKER_PID=$!
 fi
 
