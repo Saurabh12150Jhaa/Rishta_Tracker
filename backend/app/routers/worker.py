@@ -1,14 +1,29 @@
 import hmac
 import json
+import os
+import shutil
+import sqlite3
+import tempfile
 import time
+import zipfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
-from fastapi import APIRouter, Depends, Header, HTTPException
+from fastapi import APIRouter, Depends, File, Header, HTTPException, Query, UploadFile
+from starlette.background import BackgroundTask
 from fastapi.responses import FileResponse
 from ..auth import get_current_member
-from ..config import WORKER_SHARED_SECRET, ZLLAMA_API_KEY
-from ..db import get_app_settings, get_conn, utc_now
+from ..config import MEDIA_DIR, WORKER_SHARED_SECRET, ZLLAMA_API_KEY
+from ..db import (
+    count_user_rows,
+    get_app_settings,
+    get_conn,
+    get_data_epoch,
+    init_db,
+    logical_sha,
+    sqlite_backup_to,
+    utc_now,
+)
 from ..models import PROFILE_EDITABLE_FIELDS
 from ..services.ai_extractor import build_disambiguation_tag
 from ..services.dedupe import find_duplicate_candidates
@@ -17,6 +32,8 @@ router = APIRouter(prefix="/api/worker", tags=["worker"])
 
 
 def verify_worker_secret(x_worker_secret: Optional[str] = Header(default=None)) -> None:
+    if not WORKER_SHARED_SECRET:
+        raise HTTPException(status_code=503, detail="worker secret not configured")
     if not x_worker_secret or not hmac.compare_digest(x_worker_secret.strip(), WORKER_SHARED_SECRET):
         raise HTTPException(status_code=401, detail="Invalid X-Worker-Secret header")
 
@@ -353,3 +370,167 @@ def _expand_bulk_candidates_in_db(conn, bulk_rows: list[dict], member_name: str,
             tuple(insert_data[c] for c in cols),
         )
 
+
+
+MAX_RESTORE_BYTES = 200 * 1024 * 1024
+
+
+def _backup_meta() -> dict:
+    return {"epoch": get_data_epoch(), "user_rows": count_user_rows(), "logical_sha": logical_sha()}
+
+
+@router.get("/backup/meta")
+def worker_backup_meta(_auth: None = Depends(verify_worker_secret)):
+    return _backup_meta()
+
+
+def _iter_media_files():
+    media_root = MEDIA_DIR.resolve()
+    backups_root = (MEDIA_DIR / "backups").resolve()
+    if not media_root.is_dir():
+        return
+    for path in sorted(media_root.rglob("*")):
+        if not path.is_file():
+            continue
+        resolved = path.resolve()
+        if resolved == backups_root or backups_root in resolved.parents:
+            continue
+        yield path, path.relative_to(media_root)
+
+
+@router.get("/backup/snapshot")
+def worker_backup_snapshot(_auth: None = Depends(verify_worker_secret)):
+    tmp_dir = tempfile.mkdtemp(prefix="rishta_snap_")
+    try:
+        db_copy = Path(tmp_dir) / "rishta.sqlite"
+        sqlite_backup_to(db_copy)
+        meta = _backup_meta()
+        manifest = {**meta, "created_at": utc_now()}
+        zip_path = Path(tmp_dir) / "snapshot.zip"
+        with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+            zf.write(db_copy, "rishta.sqlite")
+            for path, rel in _iter_media_files():
+                zf.write(path, f"media/{rel.as_posix()}")
+            zf.writestr("manifest.json", json.dumps(manifest))
+    except Exception:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        raise
+    return FileResponse(
+        str(zip_path),
+        media_type="application/zip",
+        filename="rishta_snapshot.zip",
+        headers={"X-Data-Epoch": meta["epoch"], "X-Logical-Sha": meta["logical_sha"]},
+        background=BackgroundTask(shutil.rmtree, tmp_dir, True),
+    )
+
+
+def _validate_media_entry(name: str, media_root: Path) -> Path:
+    if name.startswith(("/", "\\")) or "\\" in name or ".." in name.split("/") or os.path.isabs(name):
+        raise HTTPException(status_code=400, detail=f"Unsafe path in backup: {name}")
+    target = (media_root.parent / name).resolve()
+    if media_root not in target.parents:
+        raise HTTPException(status_code=400, detail=f"Unsafe path in backup: {name}")
+    return target
+
+
+@router.post("/backup/restore")
+def worker_backup_restore(
+    file: UploadFile = File(...),
+    force: bool = Query(default=False),
+    _auth: None = Depends(verify_worker_secret),
+):
+    if count_user_rows() > 0 and not force:
+        raise HTTPException(status_code=409, detail="Cloud database already has data; use force=true to overwrite")
+
+    tmp_dir = Path(tempfile.mkdtemp(prefix="rishta_restore_"))
+    try:
+        zip_path = tmp_dir / "upload.zip"
+        size = 0
+        with open(zip_path, "wb") as out:
+            while True:
+                chunk = file.file.read(1024 * 1024)
+                if not chunk:
+                    break
+                size += len(chunk)
+                if size > MAX_RESTORE_BYTES:
+                    raise HTTPException(status_code=413, detail="Backup too large (max 200MB)")
+                out.write(chunk)
+
+        try:
+            zf = zipfile.ZipFile(zip_path)
+        except zipfile.BadZipFile:
+            raise HTTPException(status_code=400, detail="Not a valid zip file")
+
+        with zf:
+            names = zf.namelist()
+            if "rishta.sqlite" not in names:
+                raise HTTPException(status_code=400, detail="rishta.sqlite missing from backup")
+            media_root = MEDIA_DIR.resolve()
+            media_entries: list[tuple[str, Path]] = []
+            for info in zf.infolist():
+                if info.filename.startswith("media/") and not info.is_dir():
+                    media_entries.append((info.filename, _validate_media_entry(info.filename, media_root)))
+                elif info.filename.startswith("media/"):
+                    _validate_media_entry(info.filename.rstrip("/"), media_root)
+            uploaded_db = tmp_dir / "rishta.sqlite"
+            with zf.open("rishta.sqlite") as src, open(uploaded_db, "wb") as dst:
+                shutil.copyfileobj(src, dst)
+
+            try:
+                up_conn = sqlite3.connect(str(uploaded_db))
+                try:
+                    integrity = up_conn.execute("PRAGMA integrity_check").fetchone()
+                    has_profiles = up_conn.execute(
+                        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='profiles'"
+                    ).fetchone()
+                except sqlite3.DatabaseError:
+                    up_conn.close()
+                    raise HTTPException(status_code=400, detail="Backup database is corrupt")
+            except sqlite3.DatabaseError:
+                raise HTTPException(status_code=400, detail="Backup database is corrupt")
+            if not integrity or integrity[0] != "ok" or not has_profiles:
+                up_conn.close()
+                raise HTTPException(status_code=400, detail="Backup database failed integrity check")
+
+            live = get_conn()
+            try:
+                up_conn.backup(live)
+            finally:
+                up_conn.close()
+                live.close()
+            init_db()
+
+            written = 0
+            for name, target in media_entries:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with zf.open(name) as src, open(target, "wb") as dst:
+                    shutil.copyfileobj(src, dst)
+                written += 1
+
+        _remap_media_paths(media_root)
+        conn = get_conn()
+        profiles = conn.execute("SELECT COUNT(*) FROM profiles").fetchone()[0]
+        conn.close()
+        return {
+            "restored": True,
+            "epoch": get_data_epoch(),
+            "user_rows": count_user_rows(),
+            "profiles": profiles,
+            "media_files": written,
+        }
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
+def _remap_media_paths(media_root: Path) -> None:
+    conn = get_conn()
+    rows = conn.execute("SELECT id, file_path FROM media_assets").fetchall()
+    for r in rows:
+        fp = r["file_path"] or ""
+        marker = "/media/"
+        if marker in fp and not Path(fp).is_file():
+            new_path = media_root / fp.rsplit(marker, 1)[1]
+            if new_path.is_file():
+                conn.execute("UPDATE media_assets SET file_path = ? WHERE id = ?", (str(new_path), r["id"]))
+    conn.commit()
+    conn.close()

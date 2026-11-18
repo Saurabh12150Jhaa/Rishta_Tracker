@@ -8,7 +8,7 @@ from dotenv import load_dotenv
 ROOT_DIR = Path(__file__).resolve().parents[2]
 load_dotenv(ROOT_DIR / ".env")
 
-DATA_DIR = ROOT_DIR / "data"
+DATA_DIR = Path(os.getenv("RISHTA_DATA_DIR") or (ROOT_DIR / "data"))
 MEDIA_DIR = DATA_DIR / "media"
 DB_PATH = DATA_DIR / "rishta.sqlite"
 CERTS_DIR = ROOT_DIR / "certs"
@@ -20,7 +20,7 @@ for sub in ("photos", "biodata", "voice", "imports", "backups"):
 ZLLAMA_API_KEY = os.getenv("ZLLAMA_API_KEY", "").strip()
 ZLLAMA_BASE_URL = os.getenv("ZLLAMA_BASE_URL", "https://zllama.corp.zscaler.com/v1").strip()
 SESSION_SECRET = os.getenv("SESSION_SECRET", "rishta-tracker-default-secret")
-WORKER_SHARED_SECRET = os.getenv("WORKER_SHARED_SECRET", "rishta-mac-worker-secret-9d4e2a7b1c8f").strip()
+WORKER_SHARED_SECRET = os.getenv("WORKER_SHARED_SECRET", "").strip()
 CLOUD_SERVER_URL = os.getenv("CLOUD_SERVER_URL", "").strip()
 HTTP_PORT = int(os.getenv("HTTP_PORT", "8080"))
 HTTPS_PORT = int(os.getenv("HTTPS_PORT", "8443"))

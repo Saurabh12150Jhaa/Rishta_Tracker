@@ -1,7 +1,7 @@
 import hashlib
 import json
-import shutil
 import sqlite3
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from .config import DB_PATH, MEDIA_DIR, OWNER_DEFAULT_PIN, FAMILY_DEFAULT_PIN, DEFAULT_AI_PRESET
@@ -285,8 +285,14 @@ def init_db() -> None:
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
         );
+
+        CREATE TABLE IF NOT EXISTS instance_meta (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        );
         """
     )
+    cur.execute("INSERT OR IGNORE INTO instance_meta (key, value) VALUES ('data_epoch', ?)", (uuid.uuid4().hex,))
 
     now = utc_now()
     # Ensure Father / Papa is removed from login members per user request
@@ -366,11 +372,73 @@ def update_app_settings(new_settings: dict) -> dict:
     return current
 
 
+USER_DATA_TABLES = (
+    "profiles",
+    "import_jobs",
+    "relatives",
+    "interactions",
+    "meetings",
+    "family_votes",
+    "follow_ups",
+    "media_assets",
+)
+VOLATILE_TABLES = ("worker_state", "worker_tasks")
+
+
+def get_data_epoch() -> str:
+    conn = get_conn()
+    row = conn.execute("SELECT value FROM instance_meta WHERE key = 'data_epoch'").fetchone()
+    conn.close()
+    return row["value"] if row else ""
+
+
+def count_user_rows() -> int:
+    conn = get_conn()
+    total = sum(conn.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0] for t in USER_DATA_TABLES)
+    conn.close()
+    return total
+
+
+def _dump_line_table(line: str) -> str | None:
+    for prefix in ("INSERT INTO ", "CREATE TABLE ", "CREATE INDEX "):
+        if line.startswith(prefix):
+            rest = line[len(prefix):].lstrip()
+            if rest.startswith('"'):
+                return rest[1:].split('"', 1)[0]
+            return rest.split(None, 1)[0].split("(")[0]
+    return None
+
+
+def logical_sha() -> str:
+    conn = get_conn()
+    h = hashlib.sha256()
+    for line in conn.iterdump():
+        tbl = _dump_line_table(line)
+        if tbl in VOLATILE_TABLES:
+            continue
+        if tbl == "sqlite_sequence" and any(f"'{t}'" in line for t in VOLATILE_TABLES):
+            continue
+        h.update(line.encode("utf-8", "replace"))
+        h.update(b"\n")
+    conn.close()
+    return h.hexdigest()
+
+
+def sqlite_backup_to(dest: Path) -> None:
+    src = get_conn()
+    dst = sqlite3.connect(str(dest))
+    try:
+        src.backup(dst)
+    finally:
+        dst.close()
+        src.close()
+
+
 def create_sqlite_backup() -> Path:
     backup_dir = MEDIA_DIR / "backups"
     backup_dir.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     dest = backup_dir / f"rishta_backup_{stamp}.sqlite"
     if DB_PATH.exists():
-        shutil.copy2(DB_PATH, dest)
+        sqlite_backup_to(dest)
     return dest
