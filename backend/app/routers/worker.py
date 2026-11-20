@@ -30,7 +30,7 @@ def verify_worker_secret(x_worker_secret: Optional[str] = Header(default=None)) 
         raise HTTPException(status_code=401, detail="Invalid X-Worker-Secret header")
 
 
-def is_remote_mac_worker_online(max_age_seconds: float = 20.0) -> tuple[bool, Optional[str], Optional[str]]:
+def is_remote_mac_worker_online(max_age_seconds: float = 60.0) -> tuple[bool, Optional[str], Optional[str]]:
     conn = get_conn()
     row = conn.execute("SELECT last_heartbeat_at, worker_hostname FROM worker_state WHERE id = 1").fetchone()
     conn.close()
@@ -103,6 +103,25 @@ def get_worker_status(member: dict = Depends(get_current_member)):
     }
 
 
+@router.post("/heartbeat")
+def worker_heartbeat(payload: dict[str, Any], _auth: None = Depends(verify_worker_secret)):
+    hostname = (payload.get("hostname") or "Zscaler-Mac").strip()
+    conn = get_conn()
+    conn.execute(
+        """
+        INSERT INTO worker_state (id, last_heartbeat_at, worker_hostname, worker_mode)
+        VALUES (1, ?, ?, 'outbound_poller')
+        ON CONFLICT(id) DO UPDATE SET
+            last_heartbeat_at = excluded.last_heartbeat_at,
+            worker_hostname = excluded.worker_hostname
+        """,
+        (utc_now(), hostname),
+    )
+    conn.commit()
+    conn.close()
+    return {"ok": True}
+
+
 @router.post("/poll")
 def poll_next_worker_task(
     payload: dict[str, Any],
@@ -122,7 +141,7 @@ def poll_next_worker_task(
         (now, hostname),
     )
 
-    stale_cutoff = (datetime.now(timezone.utc) - timedelta(seconds=45)).isoformat()
+    stale_cutoff = (datetime.now(timezone.utc) - timedelta(seconds=600)).isoformat()
     task_row = conn.execute(
         """
         SELECT * FROM worker_tasks

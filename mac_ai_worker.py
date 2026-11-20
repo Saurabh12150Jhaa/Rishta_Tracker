@@ -15,6 +15,7 @@ import sqlite3
 import ssl
 import sys
 import tempfile
+import threading
 import time
 import zipfile
 from datetime import datetime, timezone
@@ -298,6 +299,17 @@ def run_worker_loop(cloud_url: str) -> None:
         "Content-Type": "application/json",
     }
     last_backup_at = 0.0
+
+    def heartbeat_loop() -> None:
+        while True:
+            try:
+                with httpx.Client(timeout=10.0, verify=SSL_CTX) as hb:
+                    hb.post(f"{cloud_url}/api/worker/heartbeat", headers=headers, json={"hostname": hostname})
+            except Exception:
+                pass
+            time.sleep(10.0)
+
+    threading.Thread(target=heartbeat_loop, daemon=True).start()
 
     print("============================================================", flush=True)
     print("  Rishta Dossier — Outbound-Only Zscaler Mac AI Worker", flush=True)
