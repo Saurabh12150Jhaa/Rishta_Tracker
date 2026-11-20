@@ -532,8 +532,12 @@ async def complete_meeting_with_call_recording(
         source_channel=existing.get("source_channel"),
     )
 
+    ai_pending = bool(ai_bundle.get("pending_mac_ai"))
     call_transcript = ai_bundle.get("voice_transcript") or ""
-    ai_summary = ai_bundle.get("interaction_summary") or ai_bundle.get("fit_summary") or post_meeting_notes
+    if ai_pending:
+        ai_summary = post_meeting_notes or "Call recorded — summary pending (Mac AI)"
+    else:
+        ai_summary = ai_bundle.get("interaction_summary") or ai_bundle.get("fit_summary") or post_meeting_notes
 
     # Update meeting as completed
     conn.execute(
@@ -546,37 +550,39 @@ async def complete_meeting_with_call_recording(
         (post_meeting_notes, recording_url, call_transcript, ai_summary, now, meeting_id),
     )
 
-    # Apply extracted profile updates from the call recording & notes
-    updates = {}
-    for k, v in (ai_bundle.get("extracted_fields") or {}).items():
-        if k in PROFILE_EDITABLE_FIELDS and v not in (None, ""):
-            if k == "private_notes" and member["role"] != "owner":
-                continue
-            updates[k] = v
+    merged = existing
+    if not ai_pending:
+        # Apply extracted profile updates from the call recording & notes
+        updates = {}
+        for k, v in (ai_bundle.get("extracted_fields") or {}).items():
+            if k in PROFILE_EDITABLE_FIELDS and v not in (None, ""):
+                if k == "private_notes" and member["role"] != "owner":
+                    continue
+                updates[k] = v
 
-    if ai_bundle.get("suggested_status"):
-        updates["status"] = ai_bundle["suggested_status"]
-    if ai_bundle.get("suggested_ball_in_court"):
-        updates["ball_in_court"] = ai_bundle["suggested_ball_in_court"]
-    if ai_bundle.get("fit_summary"):
-        updates["fit_summary"] = ai_bundle["fit_summary"]
-    if ai_bundle.get("ai_fit_score") is not None:
-        updates["ai_fit_score"] = ai_bundle["ai_fit_score"]
-    if ai_bundle.get("pre_call_brief"):
-        updates["pre_call_brief"] = ai_bundle["pre_call_brief"]
-    if ai_bundle.get("positives"):
-        updates["positives_json"] = json.dumps(ai_bundle["positives"])
-    if ai_bundle.get("concerns"):
-        updates["concerns_json"] = json.dumps(ai_bundle["concerns"])
-    if ai_bundle.get("missing_questions"):
-        updates["missing_questions_json"] = json.dumps(ai_bundle["missing_questions"])
+        if ai_bundle.get("suggested_status"):
+            updates["status"] = ai_bundle["suggested_status"]
+        if ai_bundle.get("suggested_ball_in_court"):
+            updates["ball_in_court"] = ai_bundle["suggested_ball_in_court"]
+        if ai_bundle.get("fit_summary"):
+            updates["fit_summary"] = ai_bundle["fit_summary"]
+        if ai_bundle.get("ai_fit_score") is not None:
+            updates["ai_fit_score"] = ai_bundle["ai_fit_score"]
+        if ai_bundle.get("pre_call_brief"):
+            updates["pre_call_brief"] = ai_bundle["pre_call_brief"]
+        if ai_bundle.get("positives"):
+            updates["positives_json"] = json.dumps(ai_bundle["positives"])
+        if ai_bundle.get("concerns"):
+            updates["concerns_json"] = json.dumps(ai_bundle["concerns"])
+        if ai_bundle.get("missing_questions"):
+            updates["missing_questions_json"] = json.dumps(ai_bundle["missing_questions"])
 
-    merged = {**existing, **updates}
-    updates["disambiguation_tag"] = build_disambiguation_tag(merged)
-    updates["updated_at"] = now
+        merged = {**existing, **updates}
+        updates["disambiguation_tag"] = build_disambiguation_tag(merged)
+        updates["updated_at"] = now
 
-    set_clause = ", ".join(f"{col} = ?" for col in updates.keys())
-    conn.execute(f"UPDATE profiles SET {set_clause} WHERE id = ?", (*updates.values(), profile_id))
+        set_clause = ", ".join(f"{col} = ?" for col in updates.keys())
+        conn.execute(f"UPDATE profiles SET {set_clause} WHERE id = ?", (*updates.values(), profile_id))
 
     # Add timeline interaction
     conn.execute(
@@ -598,28 +604,29 @@ async def complete_meeting_with_call_recording(
         ),
     )
 
-    # Create next follow-up task suggested by AI
-    sugg_fu = ai_bundle.get("suggested_follow_up")
-    if sugg_fu and sugg_fu.get("task"):
-        due_days = int(sugg_fu.get("due_days") or 2)
-        due_date = (datetime.now(timezone.utc) + timedelta(days=due_days)).strftime("%Y-%m-%d")
-        conn.execute(
-            """
-            INSERT INTO follow_ups (
-                profile_id, task, due_date, assigned_to, ball_in_court,
-                completed, created_by_member, created_at
-            ) VALUES (?, ?, ?, ?, ?, 0, ?, ?)
-            """,
-            (
-                profile_id,
-                sugg_fu["task"],
-                due_date,
-                sugg_fu.get("assigned_to") or member["name"],
-                ai_bundle.get("suggested_ball_in_court") or "us",
-                member["name"],
-                now,
-            ),
-        )
+    if not ai_pending:
+        # Create next follow-up task suggested by AI
+        sugg_fu = ai_bundle.get("suggested_follow_up")
+        if sugg_fu and sugg_fu.get("task"):
+            due_days = int(sugg_fu.get("due_days") or 2)
+            due_date = (datetime.now(timezone.utc) + timedelta(days=due_days)).strftime("%Y-%m-%d")
+            conn.execute(
+                """
+                INSERT INTO follow_ups (
+                    profile_id, task, due_date, assigned_to, ball_in_court,
+                    completed, created_by_member, created_at
+                ) VALUES (?, ?, ?, ?, ?, 0, ?, ?)
+                """,
+                (
+                    profile_id,
+                    sugg_fu["task"],
+                    due_date,
+                    sugg_fu.get("assigned_to") or member["name"],
+                    ai_bundle.get("suggested_ball_in_court") or "us",
+                    member["name"],
+                    now,
+                ),
+            )
 
     conn.commit()
     updated_m = dict(conn.execute("SELECT * FROM meetings WHERE id = ?", (meeting_id,)).fetchone())

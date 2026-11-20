@@ -239,6 +239,18 @@ export const App: React.FC = () => {
                     : `Mac Offline · Instant Parser Active (${workerStatus.pending_tasks_count || 0} queued)`}
                 </span>
               )}
+              {workerStatus?.cloud_backup &&
+                (!workerStatus.cloud_backup.configured || workerStatus.cloud_backup.last_error) && (
+                  <span
+                    className="badge badge-amber"
+                    style={{ fontSize: "0.62rem", padding: "0.08rem 0.45rem" }}
+                    title={workerStatus.cloud_backup.last_error || undefined}
+                  >
+                    {workerStatus.cloud_backup.configured
+                      ? `Cloud backup error: ${workerStatus.cloud_backup.last_error}`
+                      : "Cloud backup not configured"}
+                  </span>
+                )}
             </div>
           </div>
         </div>

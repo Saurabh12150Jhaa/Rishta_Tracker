@@ -444,6 +444,13 @@ def refresh_profile_ai(profile_id: int, member: dict = Depends(get_current_membe
         source_channel=existing.get("source_channel"),
     )
 
+    if ai_bundle.get("pending_mac_ai"):
+        conn.close()
+        raise HTTPException(
+            status_code=503,
+            detail="Mac AI is offline — fit analysis will be available once your Mac worker is online",
+        )
+
     now = utc_now()
     conn.execute(
         """

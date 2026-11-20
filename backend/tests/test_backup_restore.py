@@ -26,7 +26,6 @@ def env(tmp_path, monkeypatch):
     media.mkdir()
     monkeypatch.setattr(db, "DB_PATH", tmp_path / "rishta.sqlite")
     monkeypatch.setattr(db, "MEDIA_DIR", media)
-    monkeypatch.setattr(worker_router, "MEDIA_DIR", media)
     monkeypatch.setattr(worker_router, "WORKER_SHARED_SECRET", SECRET)
     db.init_db()
     client = TestClient(app)

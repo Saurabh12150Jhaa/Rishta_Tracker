@@ -15,6 +15,8 @@ from ..services.ai_extractor import (
     split_whatsapp_chat_candidates,
     transcribe_voice_note_hinglish,
 )
+from ..services.matrimony_links import apply_matrimony_reference, parse_matrimony_reference
+from ..services.offline_extractor import PENDING_AI_TEXT
 from ..services.dedupe import build_profile_embedding_text, find_duplicate_candidates
 from ..services.media_proc import (
     image_bytes_to_data_url,
@@ -145,6 +147,13 @@ def _create_single_import_job(
     if precomputed_voice_transcript:
         effective_raw_text = f"{raw_text}\n\n=== Voice Note Transcript ===\n{precomputed_voice_transcript}".strip()
 
+    matrimony_ref = parse_matrimony_reference("\n".join([effective_raw_text, *pdf_texts]))
+    if matrimony_ref:
+        if not source_name:
+            source_name = matrimony_ref["platform"]
+        if source_channel in (None, "", "Relative"):
+            source_channel = "Matrimonial App"
+
     ai_bundle = extract_rishta_bundle(
         raw_text=effective_raw_text,
         pdf_texts=pdf_texts,
@@ -154,6 +163,13 @@ def _create_single_import_job(
         source_channel=source_channel,
         existing_profile=existing_profile,
     )
+    if matrimony_ref:
+        ref_fields = ai_bundle.setdefault("extracted_fields", {})
+        ref_fields["external_platform"] = matrimony_ref["platform"]
+        if matrimony_ref.get("profile_id"):
+            ref_fields["external_profile_id"] = matrimony_ref["profile_id"]
+        if matrimony_ref.get("url"):
+            ref_fields["external_profile_url"] = matrimony_ref["url"]
     if precomputed_voice_transcript and not ai_bundle.get("voice_transcript"):
         ai_bundle["voice_transcript"] = precomputed_voice_transcript
     if segregation_model:
@@ -538,6 +554,10 @@ def apply_import_job(job_id: int, req: ApplyImportRequest, member: dict = Depend
     pre_call_brief = req.pre_call_brief if req.pre_call_brief is not None else (extracted.get("pre_call_brief") or "")
 
     if target_id:
+        if fit_summary == PENDING_AI_TEXT:
+            fit_summary = ""
+        if pre_call_brief == PENDING_AI_TEXT:
+            pre_call_brief = ""
         existing_row = conn.execute("SELECT * FROM profiles WHERE id = ?", (target_id,)).fetchone()
         if not existing_row:
             conn.close()
@@ -559,9 +579,12 @@ def apply_import_job(job_id: int, req: ApplyImportRequest, member: dict = Depend
             updates["ai_fit_score"] = ai_fit_score
         if pre_call_brief:
             updates["pre_call_brief"] = pre_call_brief
-        updates["positives_json"] = json.dumps(positives)
-        updates["concerns_json"] = json.dumps(concerns)
-        updates["missing_questions_json"] = json.dumps(missing_q)
+        if positives:
+            updates["positives_json"] = json.dumps(positives)
+        if concerns:
+            updates["concerns_json"] = json.dumps(concerns)
+        if missing_q:
+            updates["missing_questions_json"] = json.dumps(missing_q)
 
         emb_vec = extracted.get("embedding")
         if not emb_vec:

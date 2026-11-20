@@ -237,6 +237,12 @@ STRICT ANTI-HALLUCINATION & HANDWRITTEN REGISTER RULES:
      * `"source_modality"`: e.g. `"Handwritten Diary Image"`, `"Biodata PDF #1"`, `"Audio Recording #2"`, `"WhatsApp ZIP Chat"`, or `"Pasted Text"`.
      * `"raw_row_notes"`: exact verbatim source line, Hindi text, or audio quote so the user can audit accuracy.
 
+4. MATRIMONY APP SCREENSHOTS & SHARE TEXT (Jeevansathi, Shaadi.com, BharatMatrimony):
+   - Screenshots or shared text from these apps describe ONE candidate, usually across several screenshots/pages. Treat ALL screenshots of the same profile as a SINGLE candidate: do NOT set `"is_multi_candidate_list": true` and do NOT split them into `"bulk_candidates"`.
+   - Map the labelled sections to our fields: "About" / "Profile created by" -> notes & source; "Education & Career" -> education, college, occupation, company, annual_ctc; "Family" -> father_details, mother_details, siblings_details, family_type, family_location; "Lifestyle" -> diet, smoking_drinking; "Horoscope / Kundli" -> dob, time_of_birth, place_of_birth, manglik, gotra, kundli_notes; "Basic details" -> age, height, marital_status, current_city, hometown, caste_community, sub_caste.
+   - IGNORE the "Partner Preference" / "Looking for" / "Desired partner" section for candidate fields — it describes what the candidate wants, not who they are.
+   - If the platform's profile ID (e.g. "Profile ID: ABCD1234", "JS ID", MatriId) or profile URL is visible, put it in `external_profile_id` / `external_profile_url` and set `external_platform` to "Jeevansathi", "Shaadi" or "BharatMatrimony" (set `source_channel` to "Matrimonial App" and `source_name` to the platform). Never invent an ID.
+
 Partner Preferences & Criteria for Evaluation:
 {json.dumps(prefs, indent=2)}
 
@@ -309,7 +315,10 @@ Return a valid JSON object matching this EXACT structure:
     "primary_contact_relation": "Father | Mother | Brother | Self | Mediator | null",
     "primary_contact_phone": "Phone number of parent/contact or null",
     "candidate_phone": "Candidate's direct phone if mentioned or null",
-    "linkedin_or_social": "LinkedIn/Instagram handle or URL if mentioned or null"
+    "linkedin_or_social": "LinkedIn/Instagram handle or URL if mentioned or null",
+    "external_platform": "Jeevansathi | Shaadi | BharatMatrimony | null",
+    "external_profile_id": "Matrimony app profile ID exactly as shown, or null",
+    "external_profile_url": "Matrimony app profile URL if shown, or null"
   }},
   "field_provenance": {{
     "field_name": "Biodata PDF | Handwritten Diary | WhatsApp Message | Voice Note"

@@ -1,15 +1,43 @@
-import json
-from datetime import datetime, timedelta, timezone
-from pathlib import Path
+import mimetypes
 from typing import Optional
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from starlette.concurrency import run_in_threadpool
 from ..auth import get_current_member
+from ..config import ZLLAMA_API_KEY
 from ..db import get_conn, utc_now
-from ..models import FamilyVoteRequest, FollowUpCreate, PROFILE_EDITABLE_FIELDS
-from ..services.ai_extractor import build_disambiguation_tag, extract_rishta_bundle
+from ..models import FamilyVoteRequest, FollowUpCreate
+from ..services.ai_extractor import extract_rishta_bundle
+from ..services.interaction_ai import apply_interaction_ai_result
 from ..services.media_proc import save_uploaded_bytes, transcode_audio_to_mp3_b64
+from .worker import enqueue_worker_task, is_remote_mac_worker_online, wait_for_worker_task
 
 router = APIRouter(prefix="/api", tags=["interactions"])
+
+VOICE_PENDING_SUMMARY = "Voice note — transcription pending (Mac AI)"
+INLINE_WAIT_SECONDS = 45
+
+
+def _audio_mime_type(upload: UploadFile) -> str:
+    declared = (upload.content_type or "").split(";")[0].strip().lower()
+    if declared and declared != "application/octet-stream":
+        return declared
+    guessed, _ = mimetypes.guess_type(upload.filename or "")
+    return guessed or "application/octet-stream"
+
+
+def _local_extract(raw_text: str, audio_path, existing: dict) -> dict:
+    audio_b64 = []
+    if audio_path:
+        mp3_b64 = transcode_audio_to_mp3_b64(audio_path)
+        if mp3_b64:
+            audio_b64.append(mp3_b64)
+    return extract_rishta_bundle(
+        raw_text=raw_text,
+        audio_mp3_b64_list=audio_b64,
+        existing_profile=existing,
+        source_name=existing.get("source_name"),
+        source_channel=existing.get("source_channel"),
+    )
 
 
 @router.post("/profiles/{profile_id}/interactions")
@@ -34,101 +62,40 @@ async def add_interaction(
         visibility = "shared"
 
     now = utc_now()
-    audio_mp3_b64_list: list[str] = []
+    aud_path = None
+    voice_asset_id: Optional[int] = None
     if audio_file and audio_file.filename:
         audio_bytes = await audio_file.read()
         if audio_bytes:
             aud_path, url_path = save_uploaded_bytes(audio_bytes, audio_file.filename, "voice")
-            mp3_b64 = transcode_audio_to_mp3_b64(aud_path)
-            if mp3_b64:
-                audio_mp3_b64_list.append(mp3_b64)
-            conn.execute(
+            cur_m = conn.execute(
                 """
                 INSERT INTO media_assets (
                     profile_id, asset_type, file_name, file_path, url_path,
                     mime_type, uploaded_by, created_at
-                ) VALUES (?, 'voice_note', ?, ?, ?, 'audio/mpeg', ?, ?)
+                ) VALUES (?, 'voice_note', ?, ?, ?, ?, ?, ?)
                 """,
-                (profile_id, audio_file.filename, str(aud_path), url_path, member["name"], now),
+                (
+                    profile_id,
+                    audio_file.filename,
+                    str(aud_path),
+                    url_path,
+                    _audio_mime_type(audio_file),
+                    member["name"],
+                    now,
+                ),
             )
+            voice_asset_id = cur_m.lastrowid
 
-    ai_result = None
-    transcript = ""
-    summary = raw_text[:280] if raw_text else title
-
-    if run_ai_update and (raw_text.strip() or audio_mp3_b64_list):
-        try:
-            ai_result = extract_rishta_bundle(
-                raw_text=raw_text,
-                audio_mp3_b64_list=audio_mp3_b64_list,
-                existing_profile=existing,
-                source_name=existing.get("source_name"),
-                source_channel=existing.get("source_channel"),
-            )
-            transcript = ai_result.get("voice_transcript") or ""
-            summary = ai_result.get("interaction_summary") or summary
-
-            updates = {}
-            for k, v in (ai_result.get("extracted_fields") or {}).items():
-                if k in PROFILE_EDITABLE_FIELDS and v not in (None, ""):
-                    if k == "private_notes" and member["role"] != "owner":
-                        continue
-                    updates[k] = v
-
-            if ai_result.get("suggested_status"):
-                updates["status"] = ai_result["suggested_status"]
-            if ai_result.get("suggested_ball_in_court"):
-                updates["ball_in_court"] = ai_result["suggested_ball_in_court"]
-            if ai_result.get("fit_summary"):
-                updates["fit_summary"] = ai_result["fit_summary"]
-            if ai_result.get("ai_fit_score") is not None:
-                updates["ai_fit_score"] = ai_result["ai_fit_score"]
-            if ai_result.get("pre_call_brief"):
-                updates["pre_call_brief"] = ai_result["pre_call_brief"]
-            if ai_result.get("positives"):
-                updates["positives_json"] = json.dumps(ai_result["positives"])
-            if ai_result.get("concerns"):
-                updates["concerns_json"] = json.dumps(ai_result["concerns"])
-            if ai_result.get("missing_questions"):
-                updates["missing_questions_json"] = json.dumps(ai_result["missing_questions"])
-
-            merged = {**existing, **updates}
-            updates["disambiguation_tag"] = build_disambiguation_tag(merged)
-            updates["updated_at"] = now
-
-            set_clause = ", ".join(f"{col} = ?" for col in updates.keys())
-            conn.execute(f"UPDATE profiles SET {set_clause} WHERE id = ?", (*updates.values(), profile_id))
-
-            sugg_fu = ai_result.get("suggested_follow_up")
-            if sugg_fu and sugg_fu.get("task"):
-                due_days = int(sugg_fu.get("due_days") or 2)
-                due_date = (datetime.now(timezone.utc) + timedelta(days=due_days)).strftime("%Y-%m-%d")
-                conn.execute(
-                    """
-                    INSERT INTO follow_ups (
-                        profile_id, task, due_date, assigned_to, ball_in_court,
-                        completed, created_by_member, created_at
-                    ) VALUES (?, ?, ?, ?, ?, 0, ?, ?)
-                    """,
-                    (
-                        profile_id,
-                        sugg_fu["task"],
-                        due_date,
-                        sugg_fu.get("assigned_to") or member["name"],
-                        ai_result.get("suggested_ball_in_court") or "us",
-                        member["name"],
-                        now,
-                    ),
-                )
-        except Exception as exc:
-            summary = f"{summary} (AI extraction skipped: {exc})"
+    has_input = bool(raw_text.strip() or voice_asset_id)
+    summary = raw_text[:280] if raw_text.strip() else (VOICE_PENDING_SUMMARY if voice_asset_id else title)
 
     cur = conn.execute(
         """
         INSERT INTO interactions (
             profile_id, interaction_type, title, summary, raw_text, transcript,
-            visibility, created_by_member, occurred_at, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            visibility, created_by_member, occurred_at, created_at, has_voice
+        ) VALUES (?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?)
         """,
         (
             profile_id,
@@ -136,22 +103,93 @@ async def add_interaction(
             title,
             summary,
             raw_text,
-            transcript,
             visibility,
             member["name"],
             now,
             now,
+            1 if voice_asset_id else 0,
         ),
     )
     interaction_id = cur.lastrowid
     conn.commit()
+
+    ai_result = None
+    ai_pending = False
+    task_id: Optional[int] = None
+    worker_online = False
+
+    if run_ai_update and has_input:
+        if ZLLAMA_API_KEY:
+            conn.close()
+            conn = None
+            try:
+                ai_result = await run_in_threadpool(_local_extract, raw_text, aud_path, existing)
+            except Exception as exc:
+                ai_result = None
+                note = f"{summary} (AI extraction skipped: {exc})"
+                conn = get_conn()
+                conn.execute("UPDATE interactions SET summary = ? WHERE id = ?", (note, interaction_id))
+                conn.commit()
+                conn.close()
+                conn = None
+                summary = note
+            if ai_result is not None and ai_result.get("pending_mac_ai"):
+                ai_result = None
+                ai_pending = True
+            if conn is None:
+                conn = get_conn()
+        else:
+            ai_pending = True
+
+        if ai_result is not None:
+            apply_interaction_ai_result(
+                conn, profile_id, ai_result, member["name"], member["role"], interaction_id=interaction_id
+            )
+            conn.commit()
+        elif ai_pending:
+            conn.close()
+            conn = None
+            task_id = enqueue_worker_task(
+                "update_profile_from_interaction",
+                interaction_id,
+                {
+                    "interaction_id": interaction_id,
+                    "target_profile_id": profile_id,
+                    "raw_text": raw_text,
+                    "media_asset_ids": [voice_asset_id] if voice_asset_id else [],
+                    "source_name": existing.get("source_name"),
+                    "source_channel": existing.get("source_channel"),
+                },
+            )
+            worker_online, _, _ = is_remote_mac_worker_online()
+            if worker_online:
+                live_res = await run_in_threadpool(wait_for_worker_task, task_id, INLINE_WAIT_SECONDS)
+                if live_res:
+                    conn = get_conn()
+                    apply_interaction_ai_result(
+                        conn, profile_id, live_res, member["name"], member["role"], interaction_id=interaction_id
+                    )
+                    conn.commit()
+                    conn.close()
+                    conn = None
+                    ai_pending = False
+            conn = get_conn()
+
+    row = conn.execute(
+        "SELECT summary, transcript, ai_applied_at FROM interactions WHERE id = ?", (interaction_id,)
+    ).fetchone()
     conn.close()
+    if row and row["ai_applied_at"]:
+        ai_pending = False
     return {
         "ok": True,
         "interaction_id": interaction_id,
-        "summary": summary,
-        "transcript": transcript,
+        "summary": row["summary"] if row else summary,
+        "transcript": row["transcript"] if row else "",
         "ai_result": ai_result,
+        "ai_pending": ai_pending,
+        "task_id": task_id,
+        "worker_online": worker_online,
     }
 
 

@@ -1,32 +1,24 @@
 import hmac
 import json
-import os
 import shutil
-import sqlite3
 import tempfile
 import time
-import zipfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
 from fastapi import APIRouter, Depends, File, Header, HTTPException, Query, UploadFile
-from starlette.background import BackgroundTask
 from fastapi.responses import FileResponse
+from starlette.background import BackgroundTask
 from ..auth import get_current_member
-from ..config import MEDIA_DIR, WORKER_SHARED_SECRET, ZLLAMA_API_KEY
-from ..db import (
-    count_user_rows,
-    get_app_settings,
-    get_conn,
-    get_data_epoch,
-    init_db,
-    logical_sha,
-    sqlite_backup_to,
-    utc_now,
-)
+from ..config import WORKER_SHARED_SECRET, ZLLAMA_API_KEY
+from ..db import count_user_rows, get_app_settings, get_conn, utc_now
 from ..models import PROFILE_EDITABLE_FIELDS
 from ..services.ai_extractor import build_disambiguation_tag
+from ..services import github_backup
 from ..services.dedupe import find_duplicate_candidates
+from ..services.matrimony_links import apply_matrimony_reference
+from ..services.interaction_ai import apply_interaction_ai_result
+from ..services.snapshot import SnapshotError, backup_meta, build_snapshot_zip, restore_snapshot_zip
 
 router = APIRouter(prefix="/api/worker", tags=["worker"])
 
@@ -107,6 +99,7 @@ def get_worker_status(member: dict = Depends(get_current_member)):
         "worker_hostname": hostname,
         "pending_tasks_count": len(pending_rows),
         "pending_tasks": [dict(r) for r in pending_rows],
+        "cloud_backup": github_backup.get_state(),
     }
 
 
@@ -208,6 +201,8 @@ def complete_worker_task(
     task = dict(task_row)
     now = utc_now()
     ai_bundle = payload.get("ai_bundle") or {}
+    final_status = "completed"
+    task_error = None
 
     if task["task_type"] == "extract_import_job":
         job_id = task["target_id"]
@@ -215,6 +210,12 @@ def complete_worker_task(
         if job_row:
             old_ext = json.loads(job_row["extracted_json"] or "{}")
             merged_ext = {**old_ext, **ai_bundle, "pending_mac_ai": False}
+            merged_fields = dict(merged_ext.get("extracted_fields") or {})
+            for key in ("external_platform", "external_profile_id", "external_profile_url"):
+                if not merged_fields.get(key) and (old_ext.get("extracted_fields") or {}).get(key):
+                    merged_fields[key] = old_ext["extracted_fields"][key]
+            apply_matrimony_reference(merged_fields, job_row["raw_text"])
+            merged_ext["extracted_fields"] = merged_fields
             duplicates = find_duplicate_candidates(
                 merged_ext.get("extracted_fields") or {},
                 candidate_embedding=merged_ext.get("embedding"),
@@ -270,9 +271,27 @@ def complete_worker_task(
         profile_id = task["target_id"]
         _enrich_profile_from_ai_bundle(conn, profile_id, ai_bundle, now)
 
+    elif task["task_type"] == "update_profile_from_interaction":
+        i_row = conn.execute("SELECT * FROM interactions WHERE id = ?", (task["target_id"],)).fetchone()
+        if i_row and ai_bundle.get("pending_mac_ai"):
+            final_status = "failed"
+            task_error = "Worker could not run AI (offline fallback result); nothing applied"
+        elif i_row:
+            m_row = conn.execute(
+                "SELECT role FROM members WHERE name = ?", (i_row["created_by_member"],)
+            ).fetchone()
+            apply_interaction_ai_result(
+                conn,
+                i_row["profile_id"],
+                ai_bundle,
+                i_row["created_by_member"],
+                m_row["role"] if m_row else "family",
+                interaction_id=i_row["id"],
+            )
+
     conn.execute(
-        "UPDATE worker_tasks SET status = 'completed', result_json = ?, updated_at = ? WHERE id = ?",
-        (json.dumps(ai_bundle), now, task_id),
+        "UPDATE worker_tasks SET status = ?, result_json = ?, error_text = ?, updated_at = ? WHERE id = ?",
+        (final_status, json.dumps(ai_bundle), task_error, now, task_id),
     )
     conn.commit()
     conn.close()
@@ -375,43 +394,16 @@ def _expand_bulk_candidates_in_db(conn, bulk_rows: list[dict], member_name: str,
 MAX_RESTORE_BYTES = 200 * 1024 * 1024
 
 
-def _backup_meta() -> dict:
-    return {"epoch": get_data_epoch(), "user_rows": count_user_rows(), "logical_sha": logical_sha()}
-
-
 @router.get("/backup/meta")
 def worker_backup_meta(_auth: None = Depends(verify_worker_secret)):
-    return _backup_meta()
-
-
-def _iter_media_files():
-    media_root = MEDIA_DIR.resolve()
-    backups_root = (MEDIA_DIR / "backups").resolve()
-    if not media_root.is_dir():
-        return
-    for path in sorted(media_root.rglob("*")):
-        if not path.is_file():
-            continue
-        resolved = path.resolve()
-        if resolved == backups_root or backups_root in resolved.parents:
-            continue
-        yield path, path.relative_to(media_root)
+    return backup_meta()
 
 
 @router.get("/backup/snapshot")
 def worker_backup_snapshot(_auth: None = Depends(verify_worker_secret)):
     tmp_dir = tempfile.mkdtemp(prefix="rishta_snap_")
     try:
-        db_copy = Path(tmp_dir) / "rishta.sqlite"
-        sqlite_backup_to(db_copy)
-        meta = _backup_meta()
-        manifest = {**meta, "created_at": utc_now()}
-        zip_path = Path(tmp_dir) / "snapshot.zip"
-        with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
-            zf.write(db_copy, "rishta.sqlite")
-            for path, rel in _iter_media_files():
-                zf.write(path, f"media/{rel.as_posix()}")
-            zf.writestr("manifest.json", json.dumps(manifest))
+        zip_path, manifest = build_snapshot_zip(Path(tmp_dir))
     except Exception:
         shutil.rmtree(tmp_dir, ignore_errors=True)
         raise
@@ -419,18 +411,9 @@ def worker_backup_snapshot(_auth: None = Depends(verify_worker_secret)):
         str(zip_path),
         media_type="application/zip",
         filename="rishta_snapshot.zip",
-        headers={"X-Data-Epoch": meta["epoch"], "X-Logical-Sha": meta["logical_sha"]},
+        headers={"X-Data-Epoch": manifest["epoch"], "X-Logical-Sha": manifest["logical_sha"]},
         background=BackgroundTask(shutil.rmtree, tmp_dir, True),
     )
-
-
-def _validate_media_entry(name: str, media_root: Path) -> Path:
-    if name.startswith(("/", "\\")) or "\\" in name or ".." in name.split("/") or os.path.isabs(name):
-        raise HTTPException(status_code=400, detail=f"Unsafe path in backup: {name}")
-    target = (media_root.parent / name).resolve()
-    if media_root not in target.parents:
-        raise HTTPException(status_code=400, detail=f"Unsafe path in backup: {name}")
-    return target
 
 
 @router.post("/backup/restore")
@@ -442,7 +425,7 @@ def worker_backup_restore(
     if count_user_rows() > 0 and not force:
         raise HTTPException(status_code=409, detail="Cloud database already has data; use force=true to overwrite")
 
-    tmp_dir = Path(tempfile.mkdtemp(prefix="rishta_restore_"))
+    tmp_dir = Path(tempfile.mkdtemp(prefix="rishta_upload_"))
     try:
         zip_path = tmp_dir / "upload.zip"
         size = 0
@@ -455,82 +438,9 @@ def worker_backup_restore(
                 if size > MAX_RESTORE_BYTES:
                     raise HTTPException(status_code=413, detail="Backup too large (max 200MB)")
                 out.write(chunk)
-
         try:
-            zf = zipfile.ZipFile(zip_path)
-        except zipfile.BadZipFile:
-            raise HTTPException(status_code=400, detail="Not a valid zip file")
-
-        with zf:
-            names = zf.namelist()
-            if "rishta.sqlite" not in names:
-                raise HTTPException(status_code=400, detail="rishta.sqlite missing from backup")
-            media_root = MEDIA_DIR.resolve()
-            media_entries: list[tuple[str, Path]] = []
-            for info in zf.infolist():
-                if info.filename.startswith("media/") and not info.is_dir():
-                    media_entries.append((info.filename, _validate_media_entry(info.filename, media_root)))
-                elif info.filename.startswith("media/"):
-                    _validate_media_entry(info.filename.rstrip("/"), media_root)
-            uploaded_db = tmp_dir / "rishta.sqlite"
-            with zf.open("rishta.sqlite") as src, open(uploaded_db, "wb") as dst:
-                shutil.copyfileobj(src, dst)
-
-            try:
-                up_conn = sqlite3.connect(str(uploaded_db))
-                try:
-                    integrity = up_conn.execute("PRAGMA integrity_check").fetchone()
-                    has_profiles = up_conn.execute(
-                        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='profiles'"
-                    ).fetchone()
-                except sqlite3.DatabaseError:
-                    up_conn.close()
-                    raise HTTPException(status_code=400, detail="Backup database is corrupt")
-            except sqlite3.DatabaseError:
-                raise HTTPException(status_code=400, detail="Backup database is corrupt")
-            if not integrity or integrity[0] != "ok" or not has_profiles:
-                up_conn.close()
-                raise HTTPException(status_code=400, detail="Backup database failed integrity check")
-
-            live = get_conn()
-            try:
-                up_conn.backup(live)
-            finally:
-                up_conn.close()
-                live.close()
-            init_db()
-
-            written = 0
-            for name, target in media_entries:
-                target.parent.mkdir(parents=True, exist_ok=True)
-                with zf.open(name) as src, open(target, "wb") as dst:
-                    shutil.copyfileobj(src, dst)
-                written += 1
-
-        _remap_media_paths(media_root)
-        conn = get_conn()
-        profiles = conn.execute("SELECT COUNT(*) FROM profiles").fetchone()[0]
-        conn.close()
-        return {
-            "restored": True,
-            "epoch": get_data_epoch(),
-            "user_rows": count_user_rows(),
-            "profiles": profiles,
-            "media_files": written,
-        }
+            return restore_snapshot_zip(zip_path, force=force)
+        except SnapshotError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=exc.detail)
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)
-
-
-def _remap_media_paths(media_root: Path) -> None:
-    conn = get_conn()
-    rows = conn.execute("SELECT id, file_path FROM media_assets").fetchall()
-    for r in rows:
-        fp = r["file_path"] or ""
-        marker = "/media/"
-        if marker in fp and not Path(fp).is_file():
-            new_path = media_root / fp.rsplit(marker, 1)[1]
-            if new_path.is_file():
-                conn.execute("UPDATE media_assets SET file_path = ? WHERE id = ?", (str(new_path), r["id"]))
-    conn.commit()
-    conn.close()

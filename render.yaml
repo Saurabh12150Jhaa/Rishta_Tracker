@@ -8,6 +8,10 @@ services:
         generateValue: true
       - key: WORKER_SHARED_SECRET
         sync: false
+      - key: BACKUP_GITHUB_REPO
+        value: Saurabh12150Jhaa/Rishta_Tracker_Data
+      - key: BACKUP_GITHUB_TOKEN
+        sync: false
       - key: OWNER_DEFAULT_PIN
         value: "1234"
       - key: FAMILY_DEFAULT_PIN

@@ -14,6 +14,9 @@ def _find_pattern(text: str, patterns: list[str]) -> Optional[str]:
     return None
 
 
+PENDING_AI_TEXT = "Pending Mac AI review"
+
+
 def offline_extract_rishta_bundle(
     raw_text: str = "",
     pdf_texts: Optional[list[str]] = None,
@@ -236,26 +239,15 @@ def offline_extract_rishta_bundle(
         ),
         "voice_transcript": "",
         "gotra_clash_alert": gotra_alert,
-        "ai_fit_score": 76 if not gotra_alert else 45,
-        "fit_summary": (
-            f"Initial offline extraction for {cand_name} ({fields['disambiguation_tag']}). "
-            "Deep AI fit scoring will auto-update as soon as your Mac AI Worker comes online."
-        ),
+        "ai_fit_score": None,
+        "fit_summary": PENDING_AI_TEXT,
         "positives": [x for x in [fields.get("education"), fields.get("company"), fields.get("current_city")] if x],
         "concerns": [gotra_alert] if gotra_alert else [],
         "missing_questions": missing_q,
-        "pre_call_brief": (
-            f"• Candidate: {cand_name} ({fields['disambiguation_tag']})\n"
-            f"• Package: {fields.get('annual_ctc') or 'Ask on call'}\n"
-            f"• Ask next: {'; '.join(missing_q)}"
-        ),
-        "suggested_status": "Reviewing",
-        "suggested_ball_in_court": "us",
-        "suggested_follow_up": {
-            "task": f"Review {cand_name}'s details & share Sister's biodata / ask for Kundli",
-            "due_days": 2,
-            "assigned_to": "Family",
-        },
+        "pre_call_brief": PENDING_AI_TEXT,
+        "suggested_status": None,
+        "suggested_ball_in_court": None,
+        "suggested_follow_up": None,
         "draft_whatsapp_replies": {
             "first_time_share_sister_bio": f"Namaste! 🙏 We received {cand_name}'s profile and would love to take this forward.\n\n{sister_bio}",
             "ask_missing_info": f"Namaste! 🙏 Thank you for sharing {cand_name}'s biodata. Could you please share his exact Time & Place of Birth for Kundli matching?",

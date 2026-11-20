@@ -12,17 +12,26 @@ from .db import init_db
 from .routers import auth_routes, imports, interactions, meetings, preferences, profiles, worker
 from .routers.imports import _create_single_import_job
 from .routers.meetings import background_reminder_loop
+from .services import github_backup
+from .services.matrimony_links import parse_matrimony_reference
 from .services.media_proc import save_uploaded_bytes, unpack_whatsapp_zip
 
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     init_db()
+    try:
+        await asyncio.to_thread(github_backup.startup_restore)
+    except Exception as exc:
+        github_backup.state["last_error"] = f"startup restore error: {exc}"
     reminder_task = asyncio.create_task(background_reminder_loop())
+    backup_task = asyncio.create_task(github_backup.backup_loop())
     try:
         yield
     finally:
         reminder_task.cancel()
+        backup_task.cancel()
+        await github_backup.final_push()
 
 
 app = FastAPI(
@@ -118,14 +127,15 @@ async def pwa_web_share_target(
             p, u = save_uploaded_bytes(content, up.filename, "voice")
             audio_items.append((p, u, up.filename))
 
+    shared_ref = parse_matrimony_reference(shared_text)
     if shared_text or pdf_items or image_items or audio_items:
         job = _create_single_import_job(
             raw_text=shared_text,
             pdf_items=pdf_items,
             image_items=image_items,
             audio_items=audio_items,
-            source_name="WhatsApp Share",
-            source_channel="Relative",
+            source_name=shared_ref["platform"] if shared_ref else "WhatsApp Share",
+            source_channel="Matrimonial App" if shared_ref else "Relative",
             target_profile_id=None,
             member_name=member_name,
             mode_label="single",

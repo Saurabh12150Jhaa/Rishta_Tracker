@@ -59,6 +59,9 @@ const FIELD_LABELS: Record<string, string> = {
   primary_contact_phone: "Family Contact Phone",
   candidate_phone: "Candidate Direct Phone",
   linkedin_or_social: "LinkedIn / Social",
+  external_platform: "Matrimony Platform",
+  external_profile_id: "Matrimony Profile ID",
+  external_profile_url: "Matrimony Profile Link",
   avatar_url: "Extracted Portrait Photo",
 };
 
@@ -151,6 +154,15 @@ export const ReviewImport: React.FC<ReviewImportProps> = ({
   const allExistingProfiles: any[] = job.all_existing_profiles || [];
   const pendingQueue: any[] = job.pending_queue || [];
   const aiAutoLinkReason: string | null = ext.ai_auto_link_reason || null;
+  const matrimonyPlatform: string | null =
+    ext.extracted_fields?.external_platform ||
+    (/jeevansathi|shaadi\.com|bharatmatrimony/i.test(job.raw_text || "") ? "Jeevansathi" : null);
+  const rawTextWithoutLinks = String(job.raw_text || "")
+    .replace(/https?:\/\/\S+/gi, "")
+    .replace(/\b(profile\s*id|js\s*id)\b[^\n]*/gi, "")
+    .trim();
+  const isMatrimonyLinkOnly =
+    !!matrimonyPlatform && (job.media_assets || []).length === 0 && rawTextWithoutLinks.length < 120;
 
   const handleApplySingle = async () => {
     setSaving(true);
@@ -277,6 +289,12 @@ export const ReviewImport: React.FC<ReviewImportProps> = ({
       )}
 
       {/* Header Banner */}
+      {isMatrimonyLinkOnly && (
+        <div className="card-subtle" style={{ borderLeft: "3px solid var(--color-amber, #c98a1b)" }}>
+          <strong>{matrimonyPlatform} doesn&apos;t allow apps to read profiles automatically.</strong> Share screenshots
+          of the profile pages (or copy-paste the profile text) — they&apos;ll be matched to this profile by its ID.
+        </div>
+      )}
       <div className="card" style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: "0.75rem" }}>
         <div>
           <div className="mono-label">Human-in-the-Loop AI Staging · Import #{jobId}</div>

@@ -75,6 +75,8 @@ export const ProfileDetail: React.FC<ProfileDetailProps> = ({
   const [logVisibility, setLogVisibility] = useState<"shared" | "owner_only">("shared");
   const [logAudioFile, setLogAudioFile] = useState<File | null>(null);
   const [loggingCall, setLoggingCall] = useState<boolean>(false);
+  const [audioKey, setAudioKey] = useState<number>(0);
+  const [aiNotice, setAiNotice] = useState<string | null>(null);
 
   // Follow-up input
   const [newFollowUpTask, setNewFollowUpTask] = useState<string>("");
@@ -163,6 +165,16 @@ export const ProfileDetail: React.FC<ProfileDetailProps> = ({
       }
       setLogText("");
       setLogAudioFile(null);
+      setAudioKey((k) => k + 1);
+      if (res.ai_pending) {
+        setAiNotice(
+          res.worker_online
+            ? "Saved. Mac AI is still processing — transcript & profile update will apply automatically when it finishes."
+            : "Saved. Mac AI is offline — transcript & profile update will apply automatically when your Mac worker is online."
+        );
+      } else {
+        setAiNotice(null);
+      }
       await loadProfile();
     } catch (err: any) {
       alert(err.message);
@@ -646,6 +658,9 @@ export const ProfileDetail: React.FC<ProfileDetailProps> = ({
                   ["primary_contact_name", "Family Contact Name"],
                   ["primary_contact_phone", "Family Contact Phone"],
                   ["candidate_phone", "Candidate Phone"],
+                  ["external_platform", "Matrimony Platform (Jeevansathi / Shaadi…)"],
+                  ["external_profile_id", "Matrimony Profile ID"],
+                  ["external_profile_url", "Matrimony Profile Link"],
                 ].map(([k, label]) => (
                   <div key={k}>
                     <label className="mono-label">{label}</label>
@@ -695,6 +710,19 @@ export const ProfileDetail: React.FC<ProfileDetailProps> = ({
                   {profile.primary_contact_name || "Parent"} ({profile.primary_contact_phone || "No phone"}) |
                   Candidate: {profile.candidate_phone || "No direct phone"}
                 </div>
+                {(profile.external_platform || profile.external_profile_id || profile.external_profile_url) && (
+                  <div>
+                    <span className="mono-label">Matrimony profile:</span>{" "}
+                    {profile.external_profile_url ? (
+                      <a href={profile.external_profile_url} target="_blank" rel="noopener noreferrer">
+                        {[profile.external_platform, profile.external_profile_id].filter(Boolean).join(" · ") ||
+                          profile.external_profile_url}
+                      </a>
+                    ) : (
+                      [profile.external_platform, profile.external_profile_id].filter(Boolean).join(" · ")
+                    )}
+                  </div>
+                )}
               </div>
             )}
           </div>
@@ -968,7 +996,13 @@ export const ProfileDetail: React.FC<ProfileDetailProps> = ({
               onChange={(e) => setLogText(e.target.value)}
             />
 
-            <AudioRecorder onAudioReady={(file) => setLogAudioFile(file)} />
+            <AudioRecorder key={audioKey} onAudioReady={(file) => setLogAudioFile(file)} />
+
+            {aiNotice && (
+              <div className="badge badge-amber" style={{ whiteSpace: "normal", alignSelf: "flex-start" }}>
+                {aiNotice}
+              </div>
+            )}
 
             <button
               type="submit"
@@ -1064,6 +1098,11 @@ export const ProfileDetail: React.FC<ProfileDetailProps> = ({
                     {item.summary && (
                       <p style={{ margin: "0.3rem 0 0", fontSize: "0.84rem" }}>{item.summary}</p>
                     )}
+                    {item.has_voice && !item.transcript ? (
+                      <span className="badge badge-amber" style={{ marginTop: "0.3rem" }}>
+                        Transcription pending
+                      </span>
+                    ) : null}
                     {item.transcript && (
                       <div
                         style={{

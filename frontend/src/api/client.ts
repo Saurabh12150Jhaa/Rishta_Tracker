@@ -93,6 +93,8 @@ export interface InteractionItem {
   visibility: "shared" | "owner_only";
   created_by_member: string;
   occurred_at: string;
+  has_voice?: number;
+  ai_applied_at?: string | null;
 }
 
 export interface Profile {
@@ -142,6 +144,9 @@ export interface Profile {
   primary_contact_phone?: string;
   candidate_phone?: string;
   linkedin_or_social?: string;
+  external_platform?: string;
+  external_profile_id?: string;
+  external_profile_url?: string;
 
   status: string;
   ball_in_court: string;

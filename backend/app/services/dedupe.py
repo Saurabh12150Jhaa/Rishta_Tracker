@@ -58,7 +58,8 @@ def find_duplicate_candidates(
         """
         SELECT id, full_name, dob, age, current_city, company, occupation,
                gotra, source_name, status, pass_reason, updated_at,
-               primary_contact_phone, candidate_phone, embedding_json
+               primary_contact_phone, candidate_phone, embedding_json,
+               external_platform, external_profile_id
         FROM profiles
         """
     ).fetchall()
@@ -76,6 +77,8 @@ def find_duplicate_candidates(
     }
     ext_company = (extracted_fields.get("company") or "").strip().lower()
     ext_city = (extracted_fields.get("current_city") or "").strip().lower()
+    ext_external_id = str(extracted_fields.get("external_profile_id") or "").strip().lower()
+    ext_external_platform = str(extracted_fields.get("external_platform") or "").strip().lower()
 
     matches = []
     for row in rows:
@@ -84,6 +87,15 @@ def find_duplicate_candidates(
 
         reasons = []
         score = 0.0
+
+        external_match = False
+        row_external_id = str(row["external_profile_id"] or "").strip().lower()
+        if ext_external_id and row_external_id and ext_external_id == row_external_id:
+            row_platform = str(row["external_platform"] or "").strip().lower()
+            if not (ext_external_platform and row_platform and ext_external_platform != row_platform):
+                external_match = True
+                score = 1.0
+                reasons.append(f"Same {row['external_platform'] or 'matrimony'} profile ID ({row['external_profile_id']})")
 
         row_phones = {
             p
@@ -146,7 +158,7 @@ def find_duplicate_candidates(
                     "status": row["status"],
                     "pass_reason": row["pass_reason"],
                     "previously_passed_warning": previously_passed_warning,
-                    "confidence": round(min(score, 0.99), 2),
+                    "confidence": 1.0 if external_match else round(min(score, 0.99), 2),
                     "reasons": reasons,
                 }
             )

@@ -1,36 +1,64 @@
-import React, { useRef, useState } from "react";
-import { Mic, Square, Upload, Volume2 } from "lucide-react";
+import React, { useEffect, useRef, useState } from "react";
+import { Mic, Square, Trash2, Upload, Volume2 } from "lucide-react";
 
 interface AudioRecorderProps {
-  onAudioReady: (file: File) => void;
+  onAudioReady: (file: File | null) => void;
 }
+
+const PREFERRED_MIME_TYPES = ["audio/webm;codecs=opus", "audio/webm", "audio/mp4"];
 
 export const AudioRecorder: React.FC<AudioRecorderProps> = ({ onAudioReady }) => {
   const [recording, setRecording] = useState(false);
   const [seconds, setSeconds] = useState(0);
   const [recordedName, setRecordedName] = useState<string | null>(null);
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const chunksRef = useRef<BlobPart[]>([]);
   const timerRef = useRef<number | null>(null);
+  const secondsRef = useRef(0);
+  const previewUrlRef = useRef<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
+  const isSecure =
+    typeof window !== "undefined" &&
+    (window.isSecureContext || window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1");
   const canUseLiveMic =
     typeof navigator !== "undefined" &&
     !!navigator.mediaDevices &&
     typeof navigator.mediaDevices.getUserMedia === "function" &&
-    (window.isSecureContext || window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1");
+    isSecure;
+
+  const replacePreview = (blob: Blob | null) => {
+    if (previewUrlRef.current) URL.revokeObjectURL(previewUrlRef.current);
+    const url = blob ? URL.createObjectURL(blob) : null;
+    previewUrlRef.current = url;
+    setPreviewUrl(url);
+  };
+
+  useEffect(() => {
+    return () => {
+      if (timerRef.current) clearInterval(timerRef.current);
+      if (previewUrlRef.current) URL.revokeObjectURL(previewUrlRef.current);
+      const rec = mediaRecorderRef.current;
+      if (rec && rec.state !== "inactive") {
+        rec.stream.getTracks().forEach((t) => t.stop());
+      }
+    };
+  }, []);
 
   const startRecording = async () => {
     setErrorMsg(null);
+    if (!isSecure) {
+      setErrorMsg(
+        "Live browser mic requires HTTPS or localhost. Use 'Record / Pick Audio File' below (works on HTTP too!)."
+      );
+      return;
+    }
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      const mimeType = MediaRecorder.isTypeSupported("audio/webm")
-        ? "audio/webm"
-        : MediaRecorder.isTypeSupported("audio/mp4")
-        ? "audio/mp4"
-        : "";
+      const mimeType = PREFERRED_MIME_TYPES.find((t) => MediaRecorder.isTypeSupported(t)) || "";
       const recorder = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream);
       chunksRef.current = [];
 
@@ -40,25 +68,33 @@ export const AudioRecorder: React.FC<AudioRecorderProps> = ({ onAudioReady }) =>
 
       recorder.onstop = () => {
         stream.getTracks().forEach((t) => t.stop());
-        const ext = mimeType.includes("mp4") ? "m4a" : "webm";
-        const blob = new Blob(chunksRef.current, { type: mimeType || "audio/webm" });
+        const baseType = (mimeType || "audio/webm").split(";")[0];
+        const ext = baseType.includes("mp4") ? "m4a" : "webm";
+        const blob = new Blob(chunksRef.current, { type: baseType });
         const fileName = `voice_memo_${new Date().toISOString().slice(11, 19).replace(/:/g, "")}.${ext}`;
         const file = new File([blob], fileName, { type: blob.type });
-        setRecordedName(`${fileName} (${Math.max(1, seconds)}s)`);
+        setRecordedName(`${fileName} (${Math.max(1, secondsRef.current)}s)`);
+        replacePreview(blob);
         onAudioReady(file);
       };
 
       mediaRecorderRef.current = recorder;
       recorder.start();
+      secondsRef.current = 0;
       setSeconds(0);
       setRecording(true);
       timerRef.current = window.setInterval(() => {
-        setSeconds((s) => s + 1);
+        secondsRef.current += 1;
+        setSeconds(secondsRef.current);
       }, 1000);
     } catch (err: any) {
-      setErrorMsg(
-        "Live browser mic requires HTTPS or localhost. Use 'Record / Pick Audio File' below (works on HTTP too!)."
-      );
+      if (err?.name === "NotAllowedError" || err?.name === "SecurityError") {
+        setErrorMsg("Microphone permission denied — allow mic for this site in browser settings");
+      } else if (err?.name === "NotFoundError" || err?.name === "OverconstrainedError") {
+        setErrorMsg("No microphone found");
+      } else {
+        setErrorMsg(err?.message || "Could not start recording");
+      }
     }
   };
 
@@ -77,8 +113,16 @@ export const AudioRecorder: React.FC<AudioRecorderProps> = ({ onAudioReady }) =>
     const file = e.target.files?.[0];
     if (file) {
       setRecordedName(file.name);
+      replacePreview(file);
       onAudioReady(file);
     }
+    e.target.value = "";
+  };
+
+  const handleDiscard = () => {
+    setRecordedName(null);
+    replacePreview(null);
+    onAudioReady(null);
   };
 
   return (
@@ -120,10 +164,16 @@ export const AudioRecorder: React.FC<AudioRecorderProps> = ({ onAudioReady }) =>
       </div>
 
       {recordedName && (
-        <div className="badge badge-sage" style={{ alignSelf: "flex-start" }}>
-          <Volume2 size={13} /> Attached: {recordedName}
+        <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", flexWrap: "wrap" }}>
+          <div className="badge badge-sage">
+            <Volume2 size={13} /> Attached: {recordedName}
+          </div>
+          <button type="button" className="btn btn-ghost btn-sm" onClick={handleDiscard}>
+            <Trash2 size={13} /> Discard
+          </button>
         </div>
       )}
+      {previewUrl && <audio controls src={previewUrl} style={{ width: "100%", maxWidth: 420 }} />}
       {errorMsg && (
         <div style={{ fontSize: "0.78rem", color: "var(--color-danger)" }}>{errorMsg}</div>
       )}

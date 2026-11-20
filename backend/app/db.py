@@ -71,6 +71,27 @@ DEFAULT_SETTINGS = {
 }
 
 
+COLUMN_MIGRATIONS = {
+    "profiles": {
+        "external_platform": "TEXT",
+        "external_profile_id": "TEXT",
+        "external_profile_url": "TEXT",
+    },
+    "interactions": {
+        "ai_applied_at": "TEXT",
+        "has_voice": "INTEGER NOT NULL DEFAULT 0",
+    },
+}
+
+
+def _ensure_columns(conn: sqlite3.Connection) -> None:
+    for table, columns in COLUMN_MIGRATIONS.items():
+        existing = {row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+        for col, col_type in columns.items():
+            if col not in existing:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {col_type}")
+
+
 def init_db() -> None:
     conn = get_conn()
     cur = conn.cursor()
@@ -292,6 +313,7 @@ def init_db() -> None:
         );
         """
     )
+    _ensure_columns(conn)
     cur.execute("INSERT OR IGNORE INTO instance_meta (key, value) VALUES ('data_epoch', ?)", (uuid.uuid4().hex,))
 
     now = utc_now()

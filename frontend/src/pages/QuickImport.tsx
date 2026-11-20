@@ -63,8 +63,8 @@ export const QuickImport: React.FC<QuickImportProps> = ({ preselectedProfileId, 
     }
   };
 
-  const handleAudioRecorded = (file: File) => {
-    setFiles((prev) => [...prev, file]);
+  const handleAudioRecorded = (file: File | null) => {
+    if (file) setFiles((prev) => [...prev, file]);
   };
 
   const removeFile = (idx: number) => {
@@ -302,6 +302,12 @@ export const QuickImport: React.FC<QuickImportProps> = ({ preselectedProfileId, 
             value={rawText}
             onChange={(e) => setRawText(e.target.value)}
           />
+          {/(jeevansathi|shaadi)\.com|bharatmatrimony\.com/i.test(rawText) && files.length === 0 && (
+            <div style={{ fontSize: "0.8rem", color: "var(--color-ink-2)", marginTop: "0.35rem" }}>
+              Jeevansathi doesn&apos;t allow apps to read profiles automatically. Share screenshots of the profile pages
+              (or copy-paste the profile text) — they&apos;ll be matched to this profile by its ID.
+            </div>
+          )}
         </div>
 
         {/* Live Voice Recorder or .opus Picker */}

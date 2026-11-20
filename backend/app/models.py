@@ -45,6 +45,9 @@ PROFILE_EDITABLE_FIELDS = [
     "primary_contact_phone",
     "candidate_phone",
     "linkedin_or_social",
+    "external_platform",
+    "external_profile_id",
+    "external_profile_url",
     "status",
     "ball_in_court",
     "pass_reason",
@@ -148,6 +151,9 @@ class ProfileCreateOrUpdate(BaseModel):
     primary_contact_phone: Optional[str] = None
     candidate_phone: Optional[str] = None
     linkedin_or_social: Optional[str] = None
+    external_platform: Optional[str] = None
+    external_profile_id: Optional[str] = None
+    external_profile_url: Optional[str] = None
 
     status: Optional[str] = None
     ball_in_court: Optional[str] = None
